@@ -1,5 +1,7 @@
-pub mod named;
 pub mod passfd;
+
+pub mod message;
+pub mod transport;
 
 use std::io;
 
@@ -147,7 +149,7 @@ pub(crate) mod tests {
         let (listener, provider) = ipc.into_pair();
 
         let pid = fork::safer_fork((listener, send), |(listener, mut send)| {
-            fork::set_default_child_panic_handler();
+            fork::tests::set_default_child_panic_handler();
 
             let runtime = runtime::Builder::new_current_thread()
                 .enable_all()

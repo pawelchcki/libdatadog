@@ -25,6 +25,10 @@ pub mod metrics;
 pub mod sockets;
 pub mod worker;
 
+
+#[macro_use]
+extern crate pin_project;
+
 const DEFAULT_API_VERSION: data::ApiVersion = data::ApiVersion::V1;
 
 fn runtime_id() -> &'static str {
