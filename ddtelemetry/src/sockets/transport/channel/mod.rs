@@ -12,9 +12,11 @@ impl Serialize for Channel {
     }
 }
 
-impl super::handles::SerializeHandles for Channel {
-    fn serialize_handles<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: super::handles::HandlesSerializer {
-        serializer.serialize_handle(&super::handles::Handle::None)
+impl super::handles::HandlesMove for Channel {
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: super::handles::HandlesTransfer,
+    {
+            mover.move_handle(&super::handles::Handle::None)
     }
 }
-

@@ -18,7 +18,7 @@ serde_json = {version = "1.0"}
 sys-info = {version = "0.9.0"}
 tokio = {version = "1.17", features = ["sync"]}
 tokio-util = {version = "0.6.9", features = ["codec"]}
-tokio-serde = {version = "0.8", features = []}
+tokio-serde = {version = "0.8", features = ["messagepack"]}
 tracing = {version = "0.1", default-features = false, features = ["std"], optional = true}
 uuid = {version = "0.8.2", features = ["v4"]}
 libc = {version = "0.2"}

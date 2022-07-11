@@ -1,55 +1,69 @@
-use std::{error::Error, sync::Arc, os::unix::{net::UnixStream, prelude::{RawFd, IntoRawFd}}};
+use std::{
+    error::Error,
+    os::unix::{
+        net::UnixStream,
+        prelude::{IntoRawFd, RawFd},
+    },
+};
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use super::channel::Channel;
 
-pub enum Handle{
-    UnixStream(UnixStream),
-    Channel(Channel),
-    None
+#[derive(Serialize,Deserialize)]
+pub enum Handle {
+    UnixStream(RawFd),
+    Channel(RawFd),
+    None,
 }
 
-impl IntoRawFd for Handle {
-    fn into_raw_fd(self) -> RawFd {
-        match self {
-            Handle::UnixStream(s) => s.into_raw_fd(),
-            Handle::Channel(c) => c.into_raw_fd(),
-            Handle::None => -1,
-        }
-    }
-}
-
-pub trait HandlesSerializer {
+pub trait HandlesTransfer {
     type Ok;
 
     /// The error type when some error occurs during serialization.
     type Error: Error;
 
-    fn serialize_handles<'h>(self, handles: Vec<&'h Handle>) -> Result<Self::Ok, Self::Error>;
-    fn serialize_handle<'h>(self, handle: &'h Handle) -> Result<Self::Ok, Self::Error>;
+    fn move_handles<'h>(self, handles: Vec<&'h Handle>) -> Result<Self::Ok, Self::Error>;
+    fn move_handle<'h>(self, handle: &'h Handle) -> Result<Self::Ok, Self::Error>;
 }
 
-pub trait SerializeHandles {
-    fn serialize_handles<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: HandlesSerializer;
+pub trait HandlesMove {
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: HandlesTransfer
+    ;
 }
 
-impl<'h> SerializeHandles for Handle {
-    fn serialize_handles<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: HandlesSerializer {
-        serializer.serialize_handle(self)
+impl<'h> HandlesMove for Handle {
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: HandlesTransfer
+    ,
+    {
+        mover.move_handle(self)
     }
 }
 
-impl<T> SerializeHandles for Option<T> where T: SerializeHandles {
-    fn serialize_handles<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: HandlesSerializer {
+impl<T> HandlesMove for Option<T>
+where
+    T: HandlesMove,
+{
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: HandlesTransfer
+    ,
+    {
         match self {
-            Some(h) => h.serialize_handles(serializer),
-            None => serializer.serialize_handle(&Handle::None),
+            Some(h) => h.move_handles
+    (mover),
+            None => mover.move_handle(&Handle::None),
         }
     }
 }
 
-impl<T> From<Option<T>> for Handle where T: Into<Handle> + Clone {
+impl<T> From<Option<T>> for Handle
+where
+    T: Into<Handle> + Clone,
+{
     fn from(h: Option<T>) -> Self {
         match h {
             Some(h) => h.into(),
@@ -58,20 +72,30 @@ impl<T> From<Option<T>> for Handle where T: Into<Handle> + Clone {
     }
 }
 
-impl<'h> SerializeHandles for (Handle, Handle) {
-    fn serialize_handles<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: HandlesSerializer {
-        serializer.serialize_handles(vec![&self.0, &self.1])
+impl<'h> HandlesMove for (Handle, Handle) {
+    fn move_handles<S>(&self, mover: S) -> Result<S::Ok, S::Error>
+    where
+        S: HandlesTransfer
+    ,
+    {
+        mover.move_handles
+(vec![&self.0, &self.1])
     }
 }
 
 impl From<UnixStream> for Handle {
     fn from(s: UnixStream) -> Self {
-        Handle::UnixStream(s)
+        Handle::UnixStream(s.into_raw_fd())
     }
 }
 
-impl Serialize for Handle {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
-        serializer.serialize_none()
+pub struct HandleDeserializer<Deserializer> {
+    inner: Deserializer,
+}
+
+impl<'de, D > HandleDeserializer<D> where D: Deserializer<'de>{
+    pub fn new(inner: D) -> Self {
+        Self { inner }
     }
 }
+
