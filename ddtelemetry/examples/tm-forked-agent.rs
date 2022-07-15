@@ -39,7 +39,6 @@ impl World for HelloServer {
     }
 }
 
-
     fn setup_runtime()  {
         let collector = tracing_subscriber::fmt()
             .with_writer(io::stderr)
@@ -47,35 +46,6 @@ impl World for HelloServer {
             .with_max_level(tracing::Level::TRACE)
             .finish();
         tracing::subscriber::set_global_default(collector).unwrap();
-    }
-
-    fn build_client(remote: channel::Channel) -> WorldClient {
-        let client_codec = Bincode::default();
-        let client_transport = TransportWithHandles::new(remote.try_into().unwrap(), client_codec);
-        let client = WorldClient::new(tarpc::client::Config::default(), client_transport).spawn();
-        client
-    }
-
-    fn build_server(
-        local: channel::Channel,
-    ) -> server::BaseChannel<
-        WorldRequest,
-        WorldResponse,
-        TransportWithHandles<
-            AsyncChannel,
-            tarpc::ClientMessage<WorldRequest>,
-            tarpc::Response<WorldResponse>,
-            ChannelMetadataCodec<
-                Bincode<tarpc::ClientMessage<WorldRequest>, tarpc::Response<WorldResponse>>,
-                tarpc::ClientMessage<WorldRequest>,
-                tarpc::Response<WorldResponse>,
-            >,
-        >,
-    > {
-        let codec = Bincode::default();
-        let server_transport = TransportWithHandles::new(local.try_into().unwrap(), codec);
-        let server = tarpc::server::BaseChannel::with_defaults(server_transport);
-        server
     }
 
 #[tokio::main]

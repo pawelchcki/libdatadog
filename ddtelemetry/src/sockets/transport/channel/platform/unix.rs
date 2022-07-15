@@ -17,6 +17,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::UnixStream,
 };
+use tokio_serde::{formats::MessagePack, Serializer};
 
 use crate::{
     fork::Forkable,
@@ -59,7 +60,7 @@ impl Channel {
 pub struct AsyncChannel {
     #[pin]
     inner: UnixStream,
-    metadata: Arc<ChannelMetadata>,
+    pub metadata: Arc<ChannelMetadata>,
     handles_to_close: Vec<PlatformHandle>,
 }
 
