@@ -11,8 +11,7 @@ use super::{
 use crate::{
     assert_child_exit, fork,
     sockets::transport::{
-        self,
-        channel::{AsyncChannel, ChannelMetadataCodec},
+        channel::{AsyncChannel},
         SymmetricalTransport, Transport,
     },
 };
@@ -21,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use tarpc::{
     context,
-    server::{self, Channel},
+    server::{Channel},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio_serde::formats::{Bincode, MessagePack};
+
 #[derive(Serialize, Deserialize, Debug)]
 struct ExampleData {
     channel: BetterHandle<channel::Channel>,
