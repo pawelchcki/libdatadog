@@ -54,12 +54,12 @@ pub mod fd_wrapper {
 
     use bytes::{Bytes, BytesMut};
     use serde::{Deserialize, Serialize};
-    use tokio::io::{AsyncRead, AsyncWrite};
+    
     use tokio_serde::{Deserializer, Serializer};
 
     use super::{
         channel::ChannelMetadata,
-        handles::{HandlesMove, HandlesProvider, HandlesReceive},
+        handles::{HandlesMove, HandlesReceive},
     };
 
     #[derive(Clone)]
@@ -202,13 +202,12 @@ where
 mod tests {
     use std::{
         fs::File,
-        io::{self, BufRead, Read, Seek, SeekFrom},
-        os::unix::prelude::FileExt,
+        io::{self, Seek},
     };
 
     use super::{
         channel,
-        handles::{BetterHandle, Handle, HandlesMove, HandlesReceive},
+        handles::{BetterHandle, HandlesMove, HandlesReceive},
     };
     use crate::{
         assert_child_exit, fork,
@@ -218,20 +217,20 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::io::Write;
     use tarpc::{
-        client, context,
+        context,
         server::{self, Channel},
     };
-    use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_serde::formats::{Bincode, MessagePack};
     #[derive(Serialize, Deserialize, Debug)]
     struct ExampleData {
         // #[serde(skip_serializing, skip_deserializing)]
-        channel: Handle,
+        channel: BetterHandle<channel::Channel>,
         string: String,
     }
 
     impl super::handles::HandlesMove for ExampleData {
-        fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
         where
             M: super::handles::HandlesTransfer,
         {
@@ -244,7 +243,7 @@ mod tests {
         where
             P: super::handles::HandlesProvider,
         {
-            Ok(())
+            self.channel.receive_handles(provider)
         }
     }
 
@@ -252,7 +251,7 @@ mod tests {
     fn test_basic_com() {
         let (local, remote) = channel::Channel::pair().unwrap();
 
-        let pid = fork::safer_fork((remote), |remote| {
+        let pid = fork::safer_fork(remote, |remote| {
             fork::tests::set_default_child_panic_handler();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -265,7 +264,7 @@ mod tests {
             let (some, _g) = channel::Channel::pair().unwrap();
 
             let data = ExampleData {
-                channel: Handle::from(some),
+                channel: BetterHandle::from(some),
                 string: "test".to_owned(),
             };
             let codec: MessagePack<ExampleData, ExampleData> = MessagePack::default();
@@ -300,29 +299,18 @@ mod tests {
 
     #[derive(Clone)]
     struct HelloServer;
-    use futures::future::{self, Ready};
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    impl HandlesMove for WorldResponse {
-        fn move_handles<M>(&self, _: M) -> Result<M::Ok, M::Error>
-        where
-            M: super::handles::HandlesTransfer,
-        {
-            match self {
-                WorldResponse::Hello(_) => Ok(M::Ok::default()),
-                WorldResponse::SendHandle(h) => Ok(M::Ok::default()),
-            }
-        }
-    }
+    impl HandlesMove for WorldResponse {}
 
     impl HandlesMove for WorldRequest {
-        fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
         where
             M: super::handles::HandlesTransfer,
         {
             match self {
-                WorldRequest::Hello { name: _ } => Ok(M::Ok::default()),
-                WorldRequest::SendHandle { h } => mover.move_bhandle(h.clone()),
+                WorldRequest::Hello { name: _ } => Ok(()),
+                WorldRequest::SendHandle { h } => mover.move_handle(h.clone()),
             }
         }
     }
@@ -333,23 +321,13 @@ mod tests {
             P: super::handles::HandlesProvider,
         {
             match self {
-                WorldRequest::Hello { name } => Ok(()),
                 WorldRequest::SendHandle { h } => h.receive_handles(provider),
+                _ => Ok(()),
             }
         }
     }
 
-    impl HandlesReceive for WorldResponse {
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: super::handles::HandlesProvider,
-        {
-            match self {
-                WorldResponse::Hello(_) => Ok(()),
-                WorldResponse::SendHandle(_) => Ok(()),
-            }
-        }
-    }
+    impl HandlesReceive for WorldResponse {}
 
     #[tarpc::server]
     impl World for HelloServer {
@@ -385,18 +363,13 @@ mod tests {
         runtime.spawn(server.execute(HelloServer.serve()));
 
         let client = build_client(remote);
-        let mut file = tempfile::Builder::new().tempfile().unwrap();
+        let mut file = tempfile::tempfile().unwrap();
         writeln!(file, "Yellow").unwrap();
         file.rewind().unwrap();
-        let file = file.reopen().unwrap();
 
         let hello = runtime
             .block_on(client.send_handle(context::current(), file.into()))
             .unwrap();
-
-        // let hello = runtime
-        // .block_on(client.hello(context::current(), Default::default()))
-        // .unwrap();
 
         println!("Echo: {}", hello);
     }

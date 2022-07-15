@@ -1,6 +1,6 @@
 use std::{io, time::{SystemTime, Duration}};
 
-use ddtelemetry::sockets::transport::{channel::{self, AsyncChannel}, handles::{HandlesMove, HandlesTransfer}, TransportWithHandles, fd_wrapper::ChannelMetadataCodec};
+use ddtelemetry::sockets::transport::{channel::{self, AsyncChannel}, handles::{HandlesMove, HandlesTransfer, HandlesReceive}, TransportWithHandles, fd_wrapper::ChannelMetadataCodec};
 use tarpc::{server::{self, Channel}, context};
 use tokio_serde::formats::Bincode;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -15,30 +15,18 @@ trait World {
 struct HelloServer;
 use futures::{
     future::{self, Ready},
-    prelude::*,
 };
 
 impl HandlesMove for WorldResponse {
-    fn move_handles<M>(&self, _: M) -> Result<M::Ok, M::Error>
-    where
-        M: HandlesTransfer,
-    {
-        match self {
-            WorldResponse::Hello(_) => Ok(M::Ok::default()),
-        }
-    }
 }
 
 impl HandlesMove for WorldRequest {
-    fn move_handles<M>(&self, _: M) -> Result<M::Ok, M::Error>
-    where
-        M: HandlesTransfer,
-    {
-        match self {
-            WorldRequest::Hello { name: _ } => Ok(M::Ok::default()),
-        }
-    }
 }
+
+impl HandlesReceive for WorldRequest {
+}
+
+impl HandlesReceive for WorldResponse {}
 
 impl World for HelloServer {
     // Each defined rpc generates two items in the trait, a fn that serves the RPC, and

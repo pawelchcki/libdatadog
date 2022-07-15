@@ -2,36 +2,17 @@ use std::{
     error::Error,
     fs::File,
     marker::PhantomData,
-    os::unix::{
-        net::UnixStream,
-        prelude::{IntoRawFd, RawFd},
-    }, sync::Arc,
 };
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::channel::PlatformHandle;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Handle {
-    UnixStream(RawFd),
-    Channel(RawFd),
-    File(RawFd),
-    None,
-}
-
 pub trait HandlesTransfer {
-    type Ok: Default;
-
     /// The error type when some error occurs during serialization.
     type Error: Error;
 
-    fn move_handles<'h>(self, handles: Vec<&'h Handle>) -> Result<Self::Ok, Self::Error>;
-    fn move_handle<'h>(self, handle: &'h Handle) -> Result<Self::Ok, Self::Error>;
-    fn move_bhandle<'h, T>(self, handle: BetterHandle<T>) -> Result<Self::Ok, Self::Error>;
-    fn move_none(&self) -> Result<Self::Ok, Self::Error> {
-        Ok(Self::Ok::default())
-    }
+    fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error>;
 }
 
 pub trait HandlesProvider {
@@ -41,79 +22,19 @@ pub trait HandlesProvider {
 }
 
 pub trait HandlesReceive {
-    fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+    fn receive_handles<P>(&mut self, _provider: P) -> Result<(), P::Error>
     where
-        P: HandlesProvider;
+        P: HandlesProvider {
+            Ok(())
+        }
 }
 
 pub trait HandlesMove {
-    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    fn move_handles<M>(&self, _: M) -> Result<(), M::Error>
     where
-        M: HandlesTransfer;
-}
-
-impl<'h> HandlesMove for Handle {
-    fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
-    where
-        M: HandlesTransfer,
-    {
-        mover.move_handle(self)
-    }
-}
-
-impl<T> HandlesMove for Option<T>
-where
-    T: HandlesMove,
-{
-    fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
-    where
-        M: HandlesTransfer,
-    {
-        match self {
-            Some(h) => h.move_handles(mover),
-            None => mover.move_handle(&Handle::None),
+        M: HandlesTransfer {
+            Ok(())
         }
-    }
-}
-
-impl<T> From<Option<T>> for Handle
-where
-    T: Into<Handle> + Clone,
-{
-    fn from(h: Option<T>) -> Self {
-        match h {
-            Some(h) => h.into(),
-            None => Handle::None,
-        }
-    }
-}
-
-impl<'h> HandlesMove for (Handle, Handle) {
-    fn move_handles<S>(& self, mover: S) -> Result<S::Ok, S::Error>
-    where
-        S: HandlesTransfer,
-    {
-        mover.move_handles(vec![&self.0, &self.1])
-    }
-}
-
-impl From<UnixStream> for Handle {
-    fn from(s: UnixStream) -> Self {
-        Handle::UnixStream(s.into_raw_fd())
-    }
-}
-
-pub struct HandleDeserializer<Deserializer> {
-    inner: Deserializer,
-}
-
-impl<'de, D> HandleDeserializer<D>
-where
-    D: Deserializer<'de>,
-{
-    pub fn new(inner: D) -> Self {
-        Self { inner }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -128,10 +49,10 @@ impl<T> Clone for BetterHandle<T> {
     }
 }
 
-impl<T> From<PlatformHandle> for BetterHandle<T> {
-    fn from(h: PlatformHandle) -> Self {
+impl<T> From<T> for BetterHandle<T> where T: Into<PlatformHandle>{
+    fn from(h: T) -> Self {
         Self {
-            inner: h,
+            inner: h.into(),
             phantom: PhantomData,
         }
     }
@@ -155,15 +76,6 @@ impl<T> BetterHandle<T> {
     }
 }
 
-impl From<File> for BetterHandle<File> {
-    fn from(f: File) -> Self {
-        BetterHandle {
-            inner: f.into(),
-            phantom: PhantomData,
-        }
-    }
-}
-
 impl TryFrom<BetterHandle<File>> for File {
     type Error = <File as TryFrom<PlatformHandle>>::Error;
 
@@ -173,11 +85,11 @@ impl TryFrom<BetterHandle<File>> for File {
 }
 
 impl<T> HandlesMove for BetterHandle<T> {
-    fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
+    fn move_handles<M>(& self, mover: M) -> Result<(), M::Error>
     where
         M: HandlesTransfer,
     {
-        mover.move_bhandle(self.clone())
+        mover.move_handle(self.clone())
     }
 }
 
@@ -200,14 +112,14 @@ mod tarpc_impl {
     where
         T: HandlesMove,
     {
-        fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
+        fn move_handles<M>(& self, mover: M) -> Result<(), M::Error>
         where
             M: HandlesTransfer,
         {
             if let Ok(message) = &self.message {
                 message.move_handles(mover)
             } else {
-                Ok(M::Ok::default())
+                Ok(())
             }
         }
     }
@@ -216,7 +128,7 @@ mod tarpc_impl {
     where
         T: HandlesMove,
     {
-        fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
+        fn move_handles<M>(& self, mover: M) -> Result<(), M::Error>
         where
             M: HandlesTransfer,
         {
@@ -225,8 +137,8 @@ mod tarpc_impl {
                 tarpc::ClientMessage::Cancel {
                     trace_context: _,
                     request_id: _,
-                } => Ok(M::Ok::default()),
-                _ => Ok(M::Ok::default()),
+                } => Ok(()),
+                _ => Ok(()),
             }
         }
     }

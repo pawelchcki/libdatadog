@@ -1,5 +1,4 @@
+#[cfg(unix)]
 mod unix;
-
-pub use unix::Channel;
-pub use unix::AsyncChannel;
+#[cfg(unix)]
 pub use unix::*;

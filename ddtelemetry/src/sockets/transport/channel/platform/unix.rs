@@ -21,7 +21,7 @@ use tokio::{
 
 use crate::{
     fork::Forkable,
-    sockets::transport::handles::{BetterHandle, Handle, HandlesProvider, HandlesTransfer},
+    sockets::transport::handles::{BetterHandle, HandlesProvider, HandlesTransfer},
 };
 
 /// sendfd crate's API is not able to resize the received FD container.
@@ -34,15 +34,9 @@ pub struct Channel {
     inner: StdUnixStream,
 }
 
-impl IntoRawFd for Channel {
-    fn into_raw_fd(self) -> std::os::unix::prelude::RawFd {
-        self.inner.into_raw_fd()
-    }
-}
-
-impl From<Channel> for Handle {
+impl From<Channel> for PlatformHandle {
     fn from(c: Channel) -> Self {
-        Handle::Channel(c.into_raw_fd())
+        unsafe { PlatformHandle::from_raw_fd(c.inner.into_raw_fd()) }
     }
 }
 
@@ -58,10 +52,6 @@ impl Channel {
 
     fn from_std(s: StdUnixStream) -> Self {
         Self { inner: s }
-    }
-
-    fn next<T>(&mut self) -> Option<T> {
-        todo!()
     }
 }
 
@@ -106,34 +96,9 @@ pub struct ChannelMetadata {
 }
 
 impl HandlesTransfer for &mut Arc<ChannelMetadata> {
-    type Ok = ();
-
     type Error = std::io::Error;
 
-    fn move_handles<'h>(self, handles: Vec<&'h Handle>) -> Result<Self::Ok, Self::Error> {
-        // let mut fds: Vec<RawFd> = handles
-        //     .clone()
-        //     .into_iter()
-        //     .map(|h| match h {
-        //         Handle::UnixStream(f) => *f,
-        //         Handle::Channel(f) => *f,
-        //         Handle::None => -1,
-        //         Handle::File(f) => *f,
-        //     })
-        //     .collect();
-
-        // self.fds_to_send.lock().unwrap().append(&mut fds);
-        Ok(())
-    }
-
-    fn move_handle<'h>(
-        self,
-        handle: &'h crate::sockets::transport::handles::Handle,
-    ) -> Result<Self::Ok, Self::Error> {
-        Ok(())
-    }
-
-    fn move_bhandle<'h, T>(self, handle: BetterHandle<T>) -> Result<Self::Ok, Self::Error> {
+    fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error> {
         self.fds_to_send.lock().unwrap().push(handle.into());
         Ok(())
     }
@@ -148,7 +113,7 @@ impl HandlesProvider for &mut Arc<ChannelMetadata> {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .map(PlatformHandle::from)
+                .map(|fd| unsafe { PlatformHandle::from_raw_fd(fd) })
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -188,16 +153,14 @@ impl AsyncWrite for AsyncChannel {
         let mut handles: Vec<PlatformHandle> = {
             let mut v = project.metadata.fds_to_send.lock().unwrap();
             let len = MAX_FDS.min(v.len());
-            v.drain(..len)
-                .filter(|h| h.inner.fd >= 0)
-                .collect()
+            v.drain(..len).filter(|h| h.inner.fd >= 0).collect()
         };
 
         if handles.len() > 0 {
             let fds: Vec<RawFd> = handles.iter().map(|h| h.inner.fd).collect();
             match project.inner.send_with_fd(buf, &fds) {
                 Ok(sent) => {
-                    //TODO: on linux fds can be closed immediately on OSX, we need to wait until they are accepted by the other party
+                    //TODO: on linux fds can be closed immediately after being sent - however on OSX, we need to wait until they are accepted by the other party
                     // For now lets leak FDs indefinitely
                     project.handles_to_close.append(&mut handles);
                     Poll::Ready(Ok(sent))
@@ -271,6 +234,18 @@ pub struct PlatformHandle {
 }
 
 impl PlatformHandle {
+    /// Creates PlatformHandle instance from supplied RawFd
+    ///
+    /// # Safety caller must ensure the RawFd is valid and open, and that the resulting PlatformHandle will
+    ///          have exclusive ownership of the file descriptor
+    ///
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        let inner = Arc::new(PlatformHandleInner { fd });
+        Self { fd, inner }
+    }
+}
+
+impl PlatformHandle {
     fn try_into_rawfd(self: PlatformHandle) -> Result<RawFd, io::Error> {
         if self.inner.fd < 0 {
             return Err(io::Error::new(
@@ -287,7 +262,7 @@ impl PlatformHandle {
                 let fd = inner.fd;
                 inner.fd = -1; // prevend FD from being closed on drop
                 Ok(fd)
-            },
+            }
             Err(inner) => Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
@@ -330,16 +305,13 @@ impl Drop for PlatformHandleInner {
     }
 }
 
-impl From<RawFd> for PlatformHandle {
-    fn from(fd: RawFd) -> Self {
-        let inner = Arc::new(PlatformHandleInner { fd });
-        Self { fd, inner }
-    }
-}
-
 impl From<File> for PlatformHandle {
     fn from(f: File) -> Self {
-        PlatformHandle::from(f.into_raw_fd())
+        {
+            unsafe {
+                PlatformHandle::from_raw_fd(f.into_raw_fd())
+            }
+        }
     }
 }
 
@@ -348,7 +320,7 @@ impl TryFrom<PlatformHandle> for File {
 
     fn try_from(handle: PlatformHandle) -> Result<Self, Self::Error> {
         let fd = handle.try_into_rawfd()?;
-        
+
         // Safety: handle try_unwrap_inner will ensure returned handle is initialized and only owned once
         // Safety: all callers should  ensure handle is a file handle
         Ok(unsafe { File::from_raw_fd(fd) })
