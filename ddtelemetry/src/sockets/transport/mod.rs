@@ -1,40 +1,22 @@
 use std::{
-    error::Error,
     io,
-    marker::PhantomData,
-    os::unix::{
-        net::UnixStream,
-        prelude::{AsRawFd, RawFd},
-    },
     pin::Pin,
-    sync::{mpsc, Arc},
     task::{Context, Poll},
 };
 
-use bytes::BytesMut;
-use futures::{ready, Sink, Stream, TryStream};
+use futures::{ Sink, Stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_serde::Deserializer;
-use tokio_serde::{formats::MessagePack, Serializer};
-use tokio_serde::{Framed as SerdeFramed, *};
+use tokio_serde::{ Serializer};
+use tokio_serde::{Framed as SerdeFramed};
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
-use self::{channel::AsyncChannel, handles::HandlesMove};
+use self::{channel::AsyncChannel};
 
 pub mod channel;
 pub mod handles;
-
-#[pin_project]
-#[derive(Debug)]
-pub struct FramedWithHandles<Transport, Item, SinkItem, Codec> {
-    #[pin]
-    inner: Transport,
-    #[pin]
-    codec: Codec,
-    item: PhantomData<(Item, SinkItem)>,
-}
 
 #[pin_project]
 pub struct TransportWithHandles<S, Item, SinkItem, Codec> {

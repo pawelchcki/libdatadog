@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    fmt::Display,
     fs::File,
     io,
     os::unix::{
