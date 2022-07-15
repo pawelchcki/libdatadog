@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 
 
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize,Deserialize, Debug)]
 pub enum Handle {
     UnixStream(RawFd),
     Channel(RawFd),
@@ -17,13 +17,16 @@ pub enum Handle {
 }
 
 pub trait HandlesTransfer {
-    type Ok;
+    type Ok: Default;
 
     /// The error type when some error occurs during serialization.
     type Error: Error;
 
     fn move_handles<'h>(self, handles: Vec<&'h Handle>) -> Result<Self::Ok, Self::Error>;
     fn move_handle<'h>(self, handle: &'h Handle) -> Result<Self::Ok, Self::Error>;
+    fn move_none(&self) -> Result<Self::Ok, Self::Error> {
+        Ok(Self::Ok::default())
+    }
 }
 
 pub trait HandlesMove {
@@ -99,3 +102,28 @@ impl<'de, D > HandleDeserializer<D> where D: Deserializer<'de>{
     }
 }
 
+impl<T> HandlesMove for tarpc::Response<T> where T: HandlesMove {
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: HandlesTransfer
+     {
+        if let Ok(message) = &self.message {
+            message.move_handles(mover)
+        } else {
+            Ok(M::Ok::default())
+        }
+    }
+}
+
+impl<T> HandlesMove for tarpc::ClientMessage<T> where T: HandlesMove {
+    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    where
+        M: HandlesTransfer
+     {
+        match self {
+            tarpc::ClientMessage::Request(r) => r.message.move_handles(mover),
+            tarpc::ClientMessage::Cancel { trace_context: _, request_id: _ } => Ok(M::Ok::default()),
+            _ => Ok(M::Ok::default()),
+        }
+    }
+}

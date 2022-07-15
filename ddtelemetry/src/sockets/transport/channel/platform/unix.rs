@@ -13,11 +13,11 @@ use tokio::{
     net::UnixStream,
 };
 
-use crate::fork::Forkable;
+use crate::{fork::Forkable, sockets::transport::handles::{HandlesTransfer, Handle}};
 
 /// sendfd crate's API is not able to resize the received FD container.
 /// limiting the max number of sent FDs should allow help lower a chance of surprise
-/// TODO: sendfd should be rewrited, fixed to handle cases like these better.
+/// TODO: sendfd should be rewriten, fixed to handle cases like these better.
 const MAX_FDS: usize = 20;
 
 #[derive(Debug)]
@@ -28,6 +28,12 @@ pub struct Channel {
 impl IntoRawFd for Channel {
     fn into_raw_fd(self) -> std::os::unix::prelude::RawFd {
         self.inner.into_raw_fd()
+    }
+}
+
+impl From<Channel> for Handle {
+    fn from(c: Channel) -> Self {
+        Handle::Channel(c.into_raw_fd())
     }
 }
 
@@ -89,12 +95,35 @@ pub struct ChannelMetadata {
     fds_received: Mutex<Vec<RawFd>>,
 }
 
+impl HandlesTransfer for &mut Arc<ChannelMetadata> {
+    type Ok = ();
+
+    type Error = std::io::Error;
+
+    fn move_handles<'h>(self, handles: Vec<&'h crate::sockets::transport::handles::Handle>) -> Result<Self::Ok, Self::Error> {
+        let mut fds: Vec<RawFd> = handles.clone().into_iter().map(|h| match h {
+            crate::sockets::transport::handles::Handle::UnixStream(f) => *f,
+            crate::sockets::transport::handles::Handle::Channel(f) => *f,
+            crate::sockets::transport::handles::Handle::None => -1,
+        }).collect();
+
+        self.fds_to_send.lock().unwrap().append(&mut fds);
+        Ok(())
+    }
+
+    fn move_handle<'h>(self, handle: &'h crate::sockets::transport::handles::Handle) -> Result<Self::Ok, Self::Error> {
+        self.move_handles(vec![handle])
+    }
+}
+
 impl TryFrom<Channel> for AsyncChannel {
     type Error = std::io::Error;
 
     fn try_from(value: Channel) -> Result<Self, Self::Error> {
+        let fd = value.inner;
+        // fd.set_nonblocking(true)?;
         Ok(AsyncChannel {
-            inner: UnixStream::from_std(value.inner)?,
+            inner: UnixStream::from_std(fd)?,
             metadata: Arc::new(ChannelMetadata {
                 fds_to_send: Mutex::new(vec![]),
                 fds_received: Mutex::new(vec![]),
@@ -118,14 +147,20 @@ impl AsyncWrite for AsyncChannel {
         };
         
         if fds.len() > 0 {
-            let res = project.inner.send_with_fd(buf, &fds);
-            let mut fds_to_close = fds.into_iter().map(ClosableFd::from).collect();
-            
-            //TODO: on linux fds can be closed immediately on OSX, we need to wait until they are accepted by the other party
-            // For now lets leak FDs
-            project.fds_to_close.append(&mut fds_to_close);
-
-            Poll::Ready(res)
+            match project.inner.send_with_fd(buf, &fds) {
+                Ok((sent)) => {
+                    //TODO: on linux fds can be closed immediately on OSX, we need to wait until they are accepted by the other party
+                    // For now lets leak FDs
+                    let mut fds_to_close = fds.into_iter().map(ClosableFd::from).collect();
+                    project.fds_to_close.append(&mut fds_to_close);
+                    Poll::Ready(Ok(sent))
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    //TODO reinject fds to send
+                    project.inner.poll_write_ready(cx).map_ok(|_| 0)
+                },
+                Err(err) => Poll::Ready(Err(err)),
+            }
         } else {
             project.inner.poll_write(cx, buf)
         }
@@ -157,9 +192,7 @@ impl AsyncRead for AsyncChannel {
 
         unsafe {
             let b = &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]);
-            let res = project.inner.recv_with_fd(b, &mut fds);
-
-            match res {
+            match project.inner.recv_with_fd(b, &mut fds) {
                 Ok((bytes_received, descriptors_received)) => {
                     let mut fds = fds[..descriptors_received].to_vec();
                     project.metadata.fds_received.lock().unwrap().append(&mut fds);
@@ -170,15 +203,11 @@ impl AsyncRead for AsyncChannel {
                     Poll::Ready(Ok(()))
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                    project.inner.poll_read_ready(cx)
                 },
                 Err(err) => Poll::Ready(Err(err)),
             }
         }
-
-        // Safety: We trust `TcpStream::read` to have filled up `n` bytes in the
-        // buffer.
     }
 
 }
