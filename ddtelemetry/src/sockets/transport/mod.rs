@@ -1,7 +1,7 @@
 use std::{
     io,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll}, error::Error,
 };
 
 use futures::{ Sink, Stream};
@@ -13,196 +13,149 @@ use tokio_serde::{Framed as SerdeFramed};
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
-use self::{channel::AsyncChannel};
+use self::{channel::{AsyncChannel, ChannelMetadataCodec, DefaultCodec, Channel}, handles::{HandlesReceive, HandlesMove}};
 
 pub mod channel;
 pub mod handles;
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        fs::File,
-        io::{self, Seek},
-    };
 
-    use super::{
-        channel,
-        handles::{BetterHandle, HandlesMove, HandlesReceive},
-    };
-    use crate::{
-        assert_child_exit, fork,
-        sockets::transport::{channel::{AsyncChannel, ChannelMetadataCodec, SymmetricalTransport}, self},
-    };
-    use futures::{SinkExt, StreamExt};
-    use serde::{Deserialize, Serialize};
-    use std::io::Write;
-    use tarpc::{
-        context,
-        server::{self, Channel}, serde_transport::Transport,
-    };
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio_serde::formats::{Bincode, MessagePack};
-    #[derive(Serialize, Deserialize, Debug)]
-    struct ExampleData {
-        channel: BetterHandle<channel::Channel>,
-        string: String,
-    }
+/// A transport that serializes to, and deserializes from, a byte stream.
+#[pin_project]
+pub struct Transport<S, Item, SinkItem, Codec> {
+    #[pin]
+    inner: SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>,
+}
 
-    impl super::handles::HandlesMove for ExampleData {
-        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-        where
-            M: super::handles::HandlesTransfer,
-        {
-            self.channel.move_handles(mover)
-        }
-    }
-
-    impl super::handles::HandlesReceive for ExampleData {
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: super::handles::HandlesProvider,
-        {
-            self.channel.receive_handles(provider)
-        }
-    }
-
-    #[test]
-    fn test_basic_com() {
-        let (local, remote) = channel::Channel::pair().unwrap();
-
-        let pid = fork::safer_fork(remote, |remote| {
-            fork::tests::set_default_child_panic_handler();
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            let _guard = runtime.enter();
-
-            let remote: AsyncChannel = remote.take().try_into().unwrap();
-            let (some, _g) = channel::Channel::pair().unwrap();
-
-            let data = ExampleData {
-                channel: BetterHandle::from(some),
-                string: "test".to_owned(),
-            };
-
-            let mut transport = SymmetricalTransport::from(remote);
-
-            runtime.block_on(transport.send(data)).unwrap();
-        })
-        .unwrap();
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = runtime.enter();
-
-        let local: AsyncChannel = local.try_into().unwrap();
-        let mut transport = SymmetricalTransport::from(local);
-
-        let res: ExampleData = runtime.block_on(transport.next()).unwrap().unwrap();
-        println!("Received: {:?}", res);
-
-        assert_child_exit!(pid);
-    }
-
-    #[tarpc::service]
-    trait World {
-        /// Returns a greeting for name.
-        async fn hello(name: String) -> String;
-        async fn send_handle(h: BetterHandle<File>) -> String;
-    }
-
-    #[derive(Clone)]
-    struct HelloServer;
-    use tracing_subscriber::fmt::format::FmtSpan;
-
-    impl HandlesMove for WorldResponse {}
-
-    impl HandlesMove for WorldRequest {
-        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-        where
-            M: super::handles::HandlesTransfer,
-        {
-            match self {
-                WorldRequest::Hello { name: _ } => Ok(()),
-                WorldRequest::SendHandle { h } => mover.move_handle(h.clone()),
-            }
-        }
-    }
-
-    impl HandlesReceive for WorldRequest {
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: super::handles::HandlesProvider,
-        {
-            match self {
-                WorldRequest::SendHandle { h } => h.receive_handles(provider),
-                _ => Ok(()),
-            }
-        }
-    }
-
-    impl HandlesReceive for WorldResponse {}
-
-    #[tarpc::server]
-    impl World for HelloServer {
-        // Each defined rpc generates two items in the trait, a fn that serves the RPC, and
-        // an associated type representing the future output by the fn.
-        async fn hello(self, _: context::Context, name: String) -> String {
-            name
-        }
-        async fn send_handle(self, _: context::Context, h: BetterHandle<File>) -> String {
-            let f: File = h.try_into().unwrap();
-            let f = tokio::fs::File::from_std(f);
-
-            let r = BufReader::new(f)
-                .lines()
-                .next_line()
-                .await
-                .unwrap()
-                .unwrap();
-            r
-        }
-    }
-
-    #[test]
-    fn test_bla() {
-        let runtime = setup_runtime();
-
-        let _guard = runtime.enter();
-        let (local, remote) = channel::Channel::pair().unwrap();
-
-        let remote = remote.take();
-        let server = tarpc::server::BaseChannel::with_defaults(Transport::try_from(local).unwrap());
-        runtime.spawn(server.execute(HelloServer.serve()));
-
-        let client = WorldClient::new(tarpc::client::Config::default(), Transport::try_from(remote).unwrap()).spawn();
-        
-        let mut file = tempfile::tempfile().unwrap();
-        writeln!(file, "Yellow").unwrap();
-        file.rewind().unwrap();
-
-        let hello = runtime
-            .block_on(client.send_handle(context::current(), file.into()))
-            .unwrap();
-
-        println!("Echo: {}", hello);
-    }
-
-    fn setup_runtime() -> tokio::runtime::Runtime {
-        let collector = tracing_subscriber::fmt()
-            .with_writer(io::stderr)
-            .with_span_events(FmtSpan::FULL)
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        tracing::subscriber::set_global_default(collector).unwrap();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime
+impl<S, Item, SinkItem, Codec> Transport<S, Item, SinkItem, Codec> {
+    /// Returns the inner transport over which messages are sent and received.
+    pub fn get_ref(&self) -> &S {
+        self.inner.get_ref().get_ref()
     }
 }
+
+impl<S, Item, SinkItem, Codec, CodecError> Stream for Transport<S, Item, SinkItem, Codec>
+where
+    S: AsyncWrite + AsyncRead,
+    Item: for<'a> Deserialize<'a>,
+    Codec: Deserializer<Item>,
+    CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
+    SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>:
+        Stream<Item = Result<Item, CodecError>>,
+{
+    type Item = io::Result<Item>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<io::Result<Item>>> {
+        self.project()
+            .inner
+            .poll_next(cx)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+}
+
+impl<S, Item, SinkItem, Codec, CodecError> Sink<SinkItem> for Transport<S, Item, SinkItem, Codec>
+where
+    S: AsyncWrite,
+    SinkItem: Serialize,
+    Codec: Serializer<SinkItem>,
+    CodecError: Into<Box<dyn Error + Send + Sync>>,
+    SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>:
+        Sink<SinkItem, Error = CodecError>,
+{
+    type Error = io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.project()
+            .inner
+            .poll_ready(cx)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: SinkItem) -> io::Result<()> {
+        self.project()
+            .inner
+            .start_send(item)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.project()
+            .inner
+            .poll_flush(cx)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.project()
+            .inner
+            .poll_close(cx)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+}
+
+/// Constructs a new transport from a framed transport and a serialization codec.
+pub fn new<S, Item, SinkItem, Codec>(
+    framed_io: Framed<S, LengthDelimitedCodec>,
+    codec: Codec,
+) -> Transport<S, Item, SinkItem, Codec>
+where
+    S: AsyncWrite + AsyncRead,
+    Item: for<'de> Deserialize<'de>,
+    SinkItem: Serialize,
+    Codec: Serializer<SinkItem> + Deserializer<Item>,
+{
+    Transport {
+        inner: SerdeFramed::new(framed_io, codec),
+    }
+}
+
+impl<S, Item, SinkItem, Codec> From<(S, Codec)> for Transport<S, Item, SinkItem, Codec>
+where
+    S: AsyncWrite + AsyncRead,
+    Item: for<'de> Deserialize<'de>,
+    SinkItem: Serialize,
+    Codec: Serializer<SinkItem> + Deserializer<Item>,
+{
+    fn from((io, codec): (S, Codec)) -> Self {
+        new(Framed::new(io, LengthDelimitedCodec::new()), codec)
+    }
+}
+
+pub type SymmetricalTransport<S, T, Codec> = Transport<S, T, T, Codec>;
+
+impl<Item, SinkItem> From<AsyncChannel>
+    for Transport<
+        AsyncChannel,
+        Item,
+        SinkItem,
+        ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>,
+    >
+where
+    Item: for<'de> Deserialize<'de> + HandlesReceive,
+    SinkItem: Serialize + HandlesMove,
+{
+    fn from(channel: AsyncChannel) -> Self {
+        let codec = ChannelMetadataCodec::from(&channel.metadata);
+        Transport::from((channel, codec))
+    }
+}
+
+impl<Item, SinkItem> TryFrom<Channel>
+    for Transport<
+        AsyncChannel,
+        Item,
+        SinkItem,
+        ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>,
+    >
+where
+    Item: for<'de> Deserialize<'de> + HandlesReceive,
+    SinkItem: Serialize + HandlesMove,
+{
+    type Error = <AsyncChannel as TryFrom<Channel>>::Error;
+
+    fn try_from(channel: Channel) -> Result<Self, Self::Error> {
+        Ok(Self::from(AsyncChannel::try_from(channel)?))
+    }
+}
+
+#[cfg(test)]
+mod tests;
