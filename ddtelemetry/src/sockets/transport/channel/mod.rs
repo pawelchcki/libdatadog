@@ -13,10 +13,10 @@ impl Serialize for Channel {
 }
 
 impl super::handles::HandlesMove for Channel {
-    fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
+    fn move_handles<M>(& self, mover: M) -> Result<M::Ok, M::Error>
     where
         M: super::handles::HandlesTransfer,
     {
-            mover.move_handle(&super::handles::Handle::None)
+        mover.move_handle(&super::handles::Handle::None)
     }
 }

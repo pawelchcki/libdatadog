@@ -57,7 +57,10 @@ pub mod fd_wrapper {
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_serde::{Deserializer, Serializer};
 
-    use super::{channel::ChannelMetadata, handles::HandlesMove};
+    use super::{
+        channel::ChannelMetadata,
+        handles::{HandlesMove, HandlesProvider, HandlesReceive},
+    };
 
     #[derive(Clone)]
     #[pin_project]
@@ -83,13 +86,18 @@ pub mod fd_wrapper {
 
     impl<Codec, Item, SinkItem> Deserializer<Item> for ChannelMetadataCodec<Codec, Item, SinkItem>
     where
-        for<'a> Item: Deserialize<'a>,
+        for<'a> Item: Deserialize<'a> + HandlesReceive,
         Codec: Deserializer<Item>,
+        <Codec as tokio_serde::Deserializer<Item>>::Error: From<std::io::Error>,
     {
         type Error = Codec::Error;
 
         fn deserialize(self: Pin<&mut Self>, src: &BytesMut) -> Result<Item, Self::Error> {
-            self.project().codec.deserialize(src)
+            let projection = self.project();
+            let mut item = projection.codec.deserialize(src)?;
+            item.receive_handles(projection.metadata)
+                .map_err(|e| e.into())?;
+            Ok(item)
         }
     }
 
@@ -192,11 +200,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{
+        fs::File,
+        io::{self, BufRead, Read, Seek, SeekFrom},
+        os::unix::prelude::FileExt,
+    };
 
     use super::{
         channel,
-        handles::{Handle, HandlesMove},
+        handles::{BetterHandle, Handle, HandlesMove, HandlesReceive},
     };
     use crate::{
         assert_child_exit, fork,
@@ -204,11 +216,13 @@ mod tests {
     };
     use futures::{sink::SinkExt, StreamExt};
     use serde::{Deserialize, Serialize};
+    use std::io::Write;
     use tarpc::{
         client, context,
         server::{self, Channel},
     };
-    use tokio_serde::formats::{MessagePack, Bincode};
+    use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+    use tokio_serde::formats::{Bincode, MessagePack};
     #[derive(Serialize, Deserialize, Debug)]
     struct ExampleData {
         // #[serde(skip_serializing, skip_deserializing)]
@@ -222,6 +236,15 @@ mod tests {
             M: super::handles::HandlesTransfer,
         {
             self.channel.move_handles(mover)
+        }
+    }
+
+    impl super::handles::HandlesReceive for ExampleData {
+        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+        where
+            P: super::handles::HandlesProvider,
+        {
+            Ok(())
         }
     }
 
@@ -272,14 +295,12 @@ mod tests {
     trait World {
         /// Returns a greeting for name.
         async fn hello(name: String) -> String;
+        async fn send_handle(h: BetterHandle<File>) -> String;
     }
 
     #[derive(Clone)]
     struct HelloServer;
-    use futures::{
-        future::{self, Ready},
-        prelude::*,
-    };
+    use futures::future::{self, Ready};
     use tracing_subscriber::fmt::format::FmtSpan;
 
     impl HandlesMove for WorldResponse {
@@ -289,29 +310,66 @@ mod tests {
         {
             match self {
                 WorldResponse::Hello(_) => Ok(M::Ok::default()),
+                WorldResponse::SendHandle(h) => Ok(M::Ok::default()),
             }
         }
     }
 
     impl HandlesMove for WorldRequest {
-        fn move_handles<M>(&self, _: M) -> Result<M::Ok, M::Error>
+        fn move_handles<M>(&self, mover: M) -> Result<M::Ok, M::Error>
         where
             M: super::handles::HandlesTransfer,
         {
             match self {
                 WorldRequest::Hello { name: _ } => Ok(M::Ok::default()),
+                WorldRequest::SendHandle { h } => mover.move_bhandle(h.clone()),
             }
         }
     }
 
+    impl HandlesReceive for WorldRequest {
+        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+        where
+            P: super::handles::HandlesProvider,
+        {
+            match self {
+                WorldRequest::Hello { name } => Ok(()),
+                WorldRequest::SendHandle { h } => h.receive_handles(provider),
+            }
+        }
+    }
+
+    impl HandlesReceive for WorldResponse {
+        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+        where
+            P: super::handles::HandlesProvider,
+        {
+            match self {
+                WorldResponse::Hello(_) => Ok(()),
+                WorldResponse::SendHandle(_) => Ok(()),
+            }
+        }
+    }
+
+    #[tarpc::server]
     impl World for HelloServer {
         // Each defined rpc generates two items in the trait, a fn that serves the RPC, and
         // an associated type representing the future output by the fn.
+        async fn hello(self, _: context::Context, name: String) -> String {
+            name
+        }
+        async fn send_handle(self, _: context::Context, h: BetterHandle<File>) -> String {
+            let f: File = h.try_into().unwrap();
+            let f = tokio::fs::File::from_std(f);
 
-        type HelloFut = Ready<String>;
-
-        fn hello(self, _: tarpc::context::Context, name: String) -> Self::HelloFut {
-            future::ready(name)
+            // let l: Vec<String> =
+            let r = BufReader::new(f)
+                .lines()
+                .next_line()
+                .await
+                .unwrap()
+                .unwrap();
+            r
         }
     }
 
@@ -327,13 +385,21 @@ mod tests {
         runtime.spawn(server.execute(HelloServer.serve()));
 
         let client = build_client(remote);
+        let mut file = tempfile::Builder::new().tempfile().unwrap();
+        writeln!(file, "Yellow").unwrap();
+        file.rewind().unwrap();
+        let file = file.reopen().unwrap();
+
         let hello = runtime
-            .block_on(client.hello(context::current(), "Stim".to_string()))
+            .block_on(client.send_handle(context::current(), file.into()))
             .unwrap();
+
+        // let hello = runtime
+        // .block_on(client.hello(context::current(), Default::default()))
+        // .unwrap();
 
         println!("Echo: {}", hello);
     }
-
 
     fn setup_runtime() -> tokio::runtime::Runtime {
         let collector = tracing_subscriber::fmt()
@@ -376,29 +442,5 @@ mod tests {
         let server_transport = TransportWithHandles::new(local.try_into().unwrap(), codec);
         let server = tarpc::server::BaseChannel::with_defaults(server_transport);
         server
-    }
-
-    #[test]
-    fn test_qqq() {
-        let runtime = setup_runtime();
-        let _guard = runtime.enter();
-        
-        let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
-
-        let server = server::BaseChannel::with_defaults(server_transport);
-        tokio::spawn(server.execute(HelloServer.serve()));
-
-        // WorldClient is generated by the #[tarpc::service] attribute. It has a constructor `new`
-        // that takes a config and any Transport as input.
-        let mut client = WorldClient::new(client::Config::default(), client_transport).spawn();
-
-        // The client has an RPC method for each RPC defined in the annotated trait. It takes the same
-        // args as defined, with the addition of a Context, which is always the first arg. The Context
-        // specifies a deadline and trace information which can be helpful in debugging requests.
-        let hello = runtime
-            .block_on(client.hello(context::current(), "Stim".to_string()))
-            .unwrap();
-
-        println!("{hello}");
     }
 }
