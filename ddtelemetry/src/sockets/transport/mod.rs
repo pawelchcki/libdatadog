@@ -1,65 +1,77 @@
 use std::{
+    error::Error,
     io,
     pin::Pin,
-    task::{Context, Poll}, error::Error,
+    task::{Context, Poll},
 };
 
-use futures::{ Sink, Stream};
+use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_serde::Deserializer;
-use tokio_serde::{ Serializer};
-use tokio_serde::{Framed as SerdeFramed};
+use tokio_serde::Framed as SerdeFramed;
+use tokio_serde::Serializer;
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
-use self::{channel::{AsyncChannel, ChannelMetadataCodec, DefaultCodec, Channel}, handles::{HandlesReceive, HandlesMove}};
+use self::{
+    channel::{
+        AsyncChannel, Channel, ChannelMetadata, ChannelMetadataCodec, DefaultCodec, Message,
+        PlatformHandle,
+    },
+    handles::{HandlesMove, HandlesReceive},
+};
 
 pub mod channel;
 pub mod handles;
 
+type DefaultSerdeFramed<Item, SinkItem> = SerdeFramed<
+    Framed<AsyncChannel, LengthDelimitedCodec>,
+    Message<Item>,
+    Message<SinkItem>,
+    DefaultCodec<Message<Item>, Message<SinkItem>>,
+>;
 
 /// A transport that serializes to, and deserializes from, a byte stream.
 #[pin_project]
-pub struct Transport<S, Item, SinkItem, Codec> {
+pub struct Transport<Item, SinkItem> {
     #[pin]
-    inner: SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>,
+    inner: DefaultSerdeFramed<Item, SinkItem>,
+
+    channel_metadata: ChannelMetadata,
 }
 
-impl<S, Item, SinkItem, Codec> Transport<S, Item, SinkItem, Codec> {
+impl<Item, SinkItem> Transport<Item, SinkItem> {
     /// Returns the inner transport over which messages are sent and received.
-    pub fn get_ref(&self) -> &S {
+    pub fn get_ref(&self) -> &AsyncChannel {
         self.inner.get_ref().get_ref()
     }
 }
 
-impl<S, Item, SinkItem, Codec, CodecError> Stream for Transport<S, Item, SinkItem, Codec>
+impl<CodecError, Item, SinkItem> Stream for Transport<Item, SinkItem>
 where
-    S: AsyncWrite + AsyncRead,
     Item: for<'a> Deserialize<'a>,
-    Codec: Deserializer<Item>,
     CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
-    SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>:
-        Stream<Item = Result<Item, CodecError>>,
+    DefaultSerdeFramed<Item, SinkItem>: Stream<Item = Result<Message<Item>, CodecError>>,
 {
     type Item = io::Result<Item>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<io::Result<Item>>> {
-        self.project()
+        let projection = self.project();
+
+        projection
             .inner
             .poll_next(cx)
+            .map_ok(|message| projection.channel_metadata.message_received(message))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
 
-impl<S, Item, SinkItem, Codec, CodecError> Sink<SinkItem> for Transport<S, Item, SinkItem, Codec>
+impl<CodecError, Item, SinkItem> Sink<SinkItem> for Transport<Item, SinkItem>
 where
-    S: AsyncWrite,
     SinkItem: Serialize,
-    Codec: Serializer<SinkItem>,
-    CodecError: Into<Box<dyn Error + Send + Sync>>,
-    SerdeFramed<Framed<S, LengthDelimitedCodec>, Item, SinkItem, Codec>:
-        Sink<SinkItem, Error = CodecError>,
+    CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
+    DefaultSerdeFramed<Item, SinkItem>: Sink<Message<SinkItem>, Error = CodecError>,
 {
     type Error = io::Error;
 
@@ -71,9 +83,10 @@ where
     }
 
     fn start_send(self: Pin<&mut Self>, item: SinkItem) -> io::Result<()> {
-        self.project()
+        let projection = self.project();
+        projection
             .inner
-            .start_send(item)
+            .start_send(projection.channel_metadata.message_outgoing(item))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
@@ -93,59 +106,35 @@ where
 }
 
 /// Constructs a new transport from a framed transport and a serialization codec.
-pub fn new<S, Item, SinkItem, Codec>(
-    framed_io: Framed<S, LengthDelimitedCodec>,
-    codec: Codec,
-) -> Transport<S, Item, SinkItem, Codec>
+fn new<Item, SinkItem>(
+    io: AsyncChannel,
+    codec: DefaultCodec<Message<Item>, Message<SinkItem>>,
+) -> Transport<Item, SinkItem>
 where
-    S: AsyncWrite + AsyncRead,
     Item: for<'de> Deserialize<'de>,
     SinkItem: Serialize,
-    Codec: Serializer<SinkItem> + Deserializer<Item>,
 {
+    let channel_metadata = io.metadata.clone();
     Transport {
-        inner: SerdeFramed::new(framed_io, codec),
+        inner: SerdeFramed::new(Framed::new(io, LengthDelimitedCodec::new()), codec),
+        channel_metadata,
     }
 }
 
-impl<S, Item, SinkItem, Codec> From<(S, Codec)> for Transport<S, Item, SinkItem, Codec>
-where
-    S: AsyncWrite + AsyncRead,
-    Item: for<'de> Deserialize<'de>,
-    SinkItem: Serialize,
-    Codec: Serializer<SinkItem> + Deserializer<Item>,
-{
-    fn from((io, codec): (S, Codec)) -> Self {
-        new(Framed::new(io, LengthDelimitedCodec::new()), codec)
-    }
-}
+pub type SymmetricalTransport<T> = Transport<T, T>;
 
-pub type SymmetricalTransport<S, T, Codec> = Transport<S, T, T, Codec>;
-
-impl<Item, SinkItem> From<AsyncChannel>
-    for Transport<
-        AsyncChannel,
-        Item,
-        SinkItem,
-        ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>,
-    >
+impl<Item, SinkItem> From<AsyncChannel> for Transport<Item, SinkItem>
 where
     Item: for<'de> Deserialize<'de> + HandlesReceive,
     SinkItem: Serialize + HandlesMove,
 {
     fn from(channel: AsyncChannel) -> Self {
         let codec = ChannelMetadataCodec::from(&channel.metadata);
-        Transport::from((channel, codec))
+        new(channel, codec)
     }
 }
 
-impl<Item, SinkItem> TryFrom<Channel>
-    for Transport<
-        AsyncChannel,
-        Item,
-        SinkItem,
-        ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>,
-    >
+impl<Item, SinkItem> TryFrom<Channel> for Transport<Item, SinkItem>
 where
     Item: for<'de> Deserialize<'de> + HandlesReceive,
     SinkItem: Serialize + HandlesMove,

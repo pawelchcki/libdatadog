@@ -1,12 +1,12 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io,
     os::unix::{
         net::UnixStream as StdUnixStream,
         prelude::{FromRawFd, IntoRawFd, RawFd},
     },
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::Poll,
 };
 
@@ -21,7 +21,9 @@ use tokio_serde::{formats::MessagePack, Serializer};
 
 use crate::{
     fork::Forkable,
-    sockets::transport::handles::{BetterHandle, HandlesProvider, HandlesTransfer},
+    sockets::transport::handles::{
+        BetterHandle, HandlesMove, HandlesProvider, HandlesReceive, HandlesTransfer,
+    },
 };
 
 /// sendfd crate's API is not able to resize the received FD container.
@@ -32,6 +34,37 @@ const MAX_FDS: usize = 20;
 #[derive(Debug)]
 pub struct Channel {
     inner: StdUnixStream,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Message<Item> {
+    item: Item,
+    acked_handles: Vec<RawFd>,
+    pid: libc::pid_t,
+}
+
+impl<T> HandlesMove for Message<T>
+where
+    T: HandlesMove,
+{
+    fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
+    where
+        M: HandlesTransfer,
+    {
+        self.item.move_handles(mover)
+    }
+}
+
+impl<T> HandlesReceive for Message<T>
+where
+    T: HandlesReceive,
+{
+    fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+    where
+        P: HandlesProvider,
+    {
+        self.item.receive_handles(provider)
+    }
 }
 
 impl From<Channel> for PlatformHandle {
@@ -60,69 +93,88 @@ impl Channel {
 pub struct AsyncChannel {
     #[pin]
     inner: UnixStream,
-    pub metadata: Arc<ChannelMetadata>,
+    pub metadata: ChannelMetadata,
     handles_to_close: Vec<PlatformHandle>,
 }
 
-impl AsyncChannel {
-    pub fn share_metadata(&self) -> Arc<ChannelMetadata> {
-        Arc::clone(&self.metadata)
-    }
-}
-
-#[derive(Debug)]
-pub struct ClosableFd {
-    fd: RawFd,
-}
-
-impl Drop for ClosableFd {
-    fn drop(&mut self) {
-        unsafe {
-            libc::close(self.fd);
-        }
-    }
-}
-
-impl From<RawFd> for ClosableFd {
-    fn from(fd: RawFd) -> Self {
-        Self { fd }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChannelMetadata {
-    fds_to_send: Mutex<Vec<PlatformHandle>>,
-    fds_received: Mutex<VecDeque<RawFd>>,
+    fds_to_send: Arc<Mutex<Vec<PlatformHandle>>>,
+    fds_received: Arc<Mutex<VecDeque<RawFd>>>,
+    fds_acked: Arc<Mutex<Vec<RawFd>>>,
+    fds_to_close: Arc<Mutex<BTreeMap<RawFd, PlatformHandle>>>,
+    pid: libc::pid_t, // must always be set to current Process ID
 }
 
-impl HandlesTransfer for &mut Arc<ChannelMetadata> {
+impl HandlesTransfer for &mut ChannelMetadata {
     type Error = std::io::Error;
 
     fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error> {
-        self.fds_to_send.lock().unwrap().push(handle.into());
+        self.queue_for_sending(handle.into());
+
         Ok(())
     }
 }
 
-impl HandlesProvider for &mut Arc<ChannelMetadata> {
+impl ChannelMetadata {
+    pub fn message_received<T>(&mut self, message: Message<T>) -> T {
+        let mut fds_to_close = self.fds_to_close.lock().unwrap();
+        let mut fds_to_close: Vec<PlatformHandle> = message
+            .acked_handles
+            .into_iter()
+            .flat_map(|fd| fds_to_close.remove(&fd))
+            .collect();
+
+        // if ack came from the same PID, it means there is a duplicate PlatformHandle instance in the same
+        // process. Thus we should leak the handles
+        if message.pid == self.pid {
+            fds_to_close.iter_mut().map(|h| h.leak());
+        }
+
+        message.item
+    }
+
+    pub fn message_outgoing<T>(&mut self, item: T) -> Message<T> {
+        Message {
+            item,
+            acked_handles: self.fds_acked.lock().unwrap().drain(..).collect(),
+            pid: self.pid,
+        }
+    }
+
+    fn defer_close_handles(&mut self, handles: Vec<PlatformHandle>) {
+        let handles = handles.into_iter().map(|h|    (h.fd, h));
+        self.fds_to_close.lock().unwrap().extend(handles);
+    }
+
+    fn queue_for_sending(&mut self, handle: PlatformHandle) {
+        self.fds_to_send.lock().unwrap().push(handle)
+    }
+
+    fn find_handle(&mut self, hint: &PlatformHandle) -> Option<PlatformHandle> {
+        if hint.fd < 0 {
+            return Some(hint.clone());
+        }
+
+        let fd = self.fds_received.lock().unwrap().pop_front();
+
+        match fd {
+            Some(fd) => Some(unsafe { PlatformHandle::from_raw_fd(fd) }),
+            None => None,
+        }
+    }
+}
+
+impl HandlesProvider for &mut ChannelMetadata {
     type Error = std::io::Error;
 
-    fn provide_handle(&self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error> {
-        if hint.fd > 0 {
-            self.fds_received
-                .lock()
-                .unwrap()
-                .pop_front()
-                .map(|fd| unsafe { PlatformHandle::from_raw_fd(fd) })
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("can't provide expected handle for hint: {:?}", hint),
-                    )
-                })
-        } else {
-            Ok(hint.clone())
-        }
+    fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error> {
+        self.find_handle(hint).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("can't provide expected handle for hint: {:?}", hint),
+            )
+        })
     }
 }
 
@@ -134,10 +186,13 @@ impl TryFrom<Channel> for AsyncChannel {
         fd.set_nonblocking(true)?;
         Ok(AsyncChannel {
             inner: UnixStream::from_std(fd)?,
-            metadata: Arc::new(ChannelMetadata {
-                fds_to_send: Mutex::new(vec![]),
-                fds_received: Mutex::new(vec![].into()),
-            }),
+            metadata: ChannelMetadata {
+                fds_to_send: Arc::new(Mutex::new(vec![])),
+                fds_received: Arc::new(Mutex::new(vec![].into())),
+                fds_to_close: Arc::new(Mutex::new(BTreeMap::new())),
+                fds_acked: Arc::new(Mutex::new(vec![])),
+                pid: unsafe { libc::getpid() },
+            },
             handles_to_close: vec![],
         })
     }
@@ -150,23 +205,23 @@ impl AsyncWrite for AsyncChannel {
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let project = self.project();
-        let mut handles: Vec<PlatformHandle> = {
+        let handles: Vec<PlatformHandle> = {
             let mut v = project.metadata.fds_to_send.lock().unwrap();
             let len = MAX_FDS.min(v.len());
-            v.drain(..len).filter(|h| h.inner.fd >= 0).collect()
+            v.drain(..len)
+                .filter(|h| h.inner.read().unwrap().fd >= 0)
+                .collect()
         };
 
         if handles.len() > 0 {
-            let fds: Vec<RawFd> = handles.iter().map(|h| h.inner.fd).collect();
+            let fds: Vec<RawFd> = handles.iter().map(|h| h.inner.read().unwrap().fd).collect();
             match project.inner.send_with_fd(buf, &fds) {
                 Ok(sent) => {
-                    //TODO: on linux fds can be closed immediately after being sent - however on OSX, we need to wait until they are accepted by the other party
-                    // For now lets leak FDs indefinitely
-                    project.handles_to_close.append(&mut handles);
+                    project.metadata.defer_close_handles(handles);
                     Poll::Ready(Ok(sent))
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    //TODO reinject fds to send
+                    project.metadata.fds_to_send.lock().unwrap().extend(handles.into_iter());
                     project.inner.poll_write_ready(cx).map_ok(|_| 0)
                 }
                 Err(err) => Poll::Ready(Err(err)),
@@ -230,54 +285,52 @@ impl AsyncRead for AsyncChannel {
 pub struct PlatformHandle {
     fd: RawFd, // Just an fd number to be used as reference, not for accessing actuall fd
     #[serde(skip)]
-    inner: Arc<PlatformHandleInner>,
+    inner: Arc<RwLock<PlatformHandleInner>>,
 }
 
 impl PlatformHandle {
     /// Creates PlatformHandle instance from supplied RawFd
     ///
     /// # Safety caller must ensure the RawFd is valid and open, and that the resulting PlatformHandle will
-    ///          have exclusive ownership of the file descriptor
+    /// # have exclusive ownership of the file descriptor
     ///
     pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let inner = Arc::new(PlatformHandleInner { fd });
+        let inner = Arc::new(RwLock::new(PlatformHandleInner { fd }));
         Self { fd, inner }
+    }
+
+    pub fn leak(&mut self) -> RawFd {
+        self.inner.write().unwrap().leak()
     }
 }
 
 impl PlatformHandle {
     fn try_into_rawfd(self: PlatformHandle) -> Result<RawFd, io::Error> {
-        if self.inner.fd < 0 {
+        let fd = self.inner.read().unwrap().fd;
+        if fd < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
                     "attempting to unwrap unitialized platform handle (fd: {} ({}))",
-                    self.fd, self.inner.fd
+                    self.fd, fd
                 ),
             ));
         }
-
-        match Arc::try_unwrap(self.inner) {
-            Ok(mut inner) => {
-                let fd = inner.fd;
-                inner.fd = -1; // prevend FD from being closed on drop
-                Ok(fd)
-            }
-            Err(inner) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "attempting to unwrap a non unique platform handle (fd: {}, copies: {})",
-                    inner.fd,
-                    Arc::strong_count(&inner)
-                ),
-            )),
-        }
+        Ok(self.inner.write().unwrap().leak())
     }
 }
 
 #[derive(Debug)]
 struct PlatformHandleInner {
     fd: RawFd,
+}
+
+impl PlatformHandleInner {
+    fn leak(&mut self) -> RawFd {
+        let fd = self.fd;
+        self.fd = -1; // prevend FD from being closed on drop
+        fd
+    }
 }
 
 impl Default for PlatformHandleInner {
@@ -288,8 +341,8 @@ impl Default for PlatformHandleInner {
 
 impl Default for PlatformHandle {
     fn default() -> Self {
-        let inner = Arc::from(PlatformHandleInner::default());
-        let fd = inner.fd;
+        let inner = Arc::from(RwLock::new(PlatformHandleInner::default()));
+        let fd = inner.read().unwrap().fd;
         Self { fd, inner }
     }
 }
@@ -308,9 +361,7 @@ impl Drop for PlatformHandleInner {
 impl From<File> for PlatformHandle {
     fn from(f: File) -> Self {
         {
-            unsafe {
-                PlatformHandle::from_raw_fd(f.into_raw_fd())
-            }
+            unsafe { PlatformHandle::from_raw_fd(f.into_raw_fd()) }
         }
     }
 }

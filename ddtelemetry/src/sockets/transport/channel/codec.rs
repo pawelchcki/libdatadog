@@ -9,12 +9,14 @@ use crate::sockets::transport::handles::{HandlesMove, HandlesReceive};
 
 use super::ChannelMetadata;
 
-pub type DefaultCodec<Item, SinkItem> = MessagePack<Item, SinkItem>;
+pub type DefaultInnerCodec<Item, SinkItem> = MessagePack<Item, SinkItem>;
+
+pub type DefaultCodec<Item, SinkItem> = ChannelMetadataCodec<DefaultInnerCodec<Item, SinkItem>, Item, SinkItem>;
 
 #[derive(Clone)]
 #[pin_project]
 pub struct ChannelMetadataCodec<Codec, Item, SinkItem> {
-    metadata: Arc<ChannelMetadata>,
+    metadata: ChannelMetadata,
     #[pin]
     codec: Codec,
     phantom: PhantomData<(Item, SinkItem)>,
@@ -24,7 +26,7 @@ impl<Codec, Item, SinkItem> ChannelMetadataCodec<Codec, Item, SinkItem>
 where
     Codec: Deserializer<Item> + Serializer<SinkItem>,
 {
-    pub fn new(codec: Codec, metadata: Arc<ChannelMetadata>) -> Self {
+    pub fn new(codec: Codec, metadata: ChannelMetadata) -> Self {
         Self {
             codec,
             metadata,
@@ -33,25 +35,25 @@ where
     }
 }
 
-impl<Item, SinkItem> From<Arc<ChannelMetadata>>
-    for ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>
+impl<Item, SinkItem> From<ChannelMetadata>
+    for ChannelMetadataCodec<DefaultInnerCodec<Item, SinkItem>, Item, SinkItem>
 where
     Item: for<'de> Deserialize<'de>,
     SinkItem: Serialize,
 {
-    fn from(metadata: Arc<ChannelMetadata>) -> Self {
-        ChannelMetadataCodec::new(DefaultCodec::default(), metadata)
+    fn from(metadata: ChannelMetadata) -> Self {
+        ChannelMetadataCodec::new(DefaultInnerCodec::default(), metadata)
     }
 }
 
-impl<Item, SinkItem> From<&Arc<ChannelMetadata>>
-    for ChannelMetadataCodec<DefaultCodec<Item, SinkItem>, Item, SinkItem>
+impl<Item, SinkItem> From<&ChannelMetadata>
+    for ChannelMetadataCodec<DefaultInnerCodec<Item, SinkItem>, Item, SinkItem>
 where
     Item: for<'de> Deserialize<'de>,
     SinkItem: Serialize,
 {
-    fn from(metadata: &Arc<ChannelMetadata>) -> Self {
-        ChannelMetadataCodec::new(DefaultCodec::default(), metadata.clone())
+    fn from(metadata: &ChannelMetadata) -> Self {
+        ChannelMetadataCodec::new(DefaultInnerCodec::default(), metadata.clone())
     }
 }
 

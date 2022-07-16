@@ -18,7 +18,7 @@ pub trait HandlesTransfer {
 pub trait HandlesProvider {
     type Error: Error;
 
-    fn provide_handle(&self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error>;
+    fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error>;
 }
 
 pub trait HandlesReceive {
