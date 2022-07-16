@@ -128,7 +128,7 @@ impl ChannelMetadata {
         // if ack came from the same PID, it means there is a duplicate PlatformHandle instance in the same
         // process. Thus we should leak the handles
         if message.pid == self.pid {
-            fds_to_close.iter_mut().map(|h| h.leak());
+            fds_to_close.iter_mut().for_each(|h| {h.leak();});
         }
 
         message.item
