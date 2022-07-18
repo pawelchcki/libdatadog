@@ -143,14 +143,16 @@ impl ChannelMetadata {
         Ok(item)
     }
 
-    pub fn create_message<T>(&mut self, item: T) -> Message<T> {
+    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>  where T: HandlesMove {
+        item.move_handles(&mut *self)?;
+
         let message = Message {
             item,
             acked_handles: self.fds_acked.lock().unwrap().drain(..).collect(),
             pid: self.pid,
         };
 
-        message
+        Ok(message)
     }
 
     fn defer_close_handles(&mut self, handles: Vec<PlatformHandle>) {

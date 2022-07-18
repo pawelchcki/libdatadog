@@ -67,10 +67,7 @@ where
 
     fn deserialize(self: Pin<&mut Self>, src: &BytesMut) -> Result<Item, Self::Error> {
         let projection = self.project();
-        let mut item = projection.codec.deserialize(src)?;
-        // item.receive_handles(projection.metadata)
-        //     .map_err(|e| e.into())?;
-        Ok(item)
+        Ok(projection.codec.deserialize(src)?)
     }
 }
 
@@ -84,7 +81,6 @@ where
     fn serialize(self: Pin<&mut Self>, item: &SinkItem) -> Result<Bytes, Self::Error> {
         let projection = self.project();
 
-        item.move_handles(projection.metadata).unwrap();
         projection.codec.serialize(item)
     }
 }

@@ -76,7 +76,7 @@ where
 
 impl<CodecError, Item, SinkItem> Sink<SinkItem> for Transport<Item, SinkItem>
 where
-    SinkItem: Serialize,
+    SinkItem: Serialize + HandlesMove,
     CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
     DefaultSerdeFramed<Item, SinkItem>: Sink<Message<SinkItem>, Error = CodecError>,
 {
@@ -91,7 +91,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: SinkItem) -> io::Result<()> {
         let this = self.project();
-        let message = this.channel_metadata.create_message(item);
+        let message = this.channel_metadata.create_message(item)?;
 
         this
             .inner
