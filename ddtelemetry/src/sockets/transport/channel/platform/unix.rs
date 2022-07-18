@@ -74,7 +74,7 @@ impl From<Channel> for PlatformHandle {
 }
 
 impl Channel {
-    pub fn pair() -> std::io::Result<(Self, Forkable<Self>)> {
+    pub fn pair() -> io::Result<(Self, Forkable<Self>)> {
         let (local, remote) = StdUnixStream::pair()?;
 
         Ok((
@@ -107,7 +107,7 @@ pub struct ChannelMetadata {
 }
 
 impl HandlesTransfer for &mut ChannelMetadata {
-    type Error = std::io::Error;
+    type Error = io::Error;
 
     fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error> {
         self.queue_for_sending(handle.into());
@@ -117,33 +117,44 @@ impl HandlesTransfer for &mut ChannelMetadata {
 }
 
 impl ChannelMetadata {
-    pub fn message_received<T>(&mut self, message: Message<T>) -> T {
-        let mut fds_to_close = self.fds_to_close.lock().unwrap();
-        let mut fds_to_close: Vec<PlatformHandle> = message
-            .acked_handles
-            .into_iter()
-            .flat_map(|fd| fds_to_close.remove(&fd))
-            .collect();
+    pub fn unwrap_message<T>(&mut self, message: Message<T>) -> Result<T, io::Error>
+    where
+        T: HandlesReceive,
+    {
+        { // close all open file desriptors that were ACKed by the other party
+            let mut fds_to_close = self.fds_to_close.lock().unwrap();
+            let mut fds_to_close: Vec<PlatformHandle> = message
+                .acked_handles
+                .into_iter()
+                .flat_map(|fd| fds_to_close.remove(&fd))
+                .collect();
 
-        // if ack came from the same PID, it means there is a duplicate PlatformHandle instance in the same
-        // process. Thus we should leak the handles
-        if message.pid == self.pid {
-            fds_to_close.iter_mut().for_each(|h| {h.leak();});
+            // if ACK came from the same PID, it means there is a duplicate PlatformHandle instance in the same
+            // process. Thus we should leak the handles
+            if message.pid == self.pid {
+                fds_to_close.iter_mut().for_each(|h| {
+                    h.leak();
+                });
+            }
         }
+        let mut item = message.item;
 
-        message.item
+        item.receive_handles(self)?;
+        Ok(item)
     }
 
-    pub fn message_outgoing<T>(&mut self, item: T) -> Message<T> {
-        Message {
+    pub fn create_message<T>(&mut self, item: T) -> Message<T> {
+        let message = Message {
             item,
             acked_handles: self.fds_acked.lock().unwrap().drain(..).collect(),
             pid: self.pid,
-        }
+        };
+
+        message
     }
 
     fn defer_close_handles(&mut self, handles: Vec<PlatformHandle>) {
-        let handles = handles.into_iter().map(|h|    (h.fd, h));
+        let handles = handles.into_iter().map(|h| (h.fd, h));
         self.fds_to_close.lock().unwrap().extend(handles);
     }
 
@@ -166,12 +177,12 @@ impl ChannelMetadata {
 }
 
 impl HandlesProvider for &mut ChannelMetadata {
-    type Error = std::io::Error;
+    type Error = io::Error;
 
     fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error> {
         self.find_handle(hint).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
+            io::Error::new(
+                io::ErrorKind::Other,
                 format!("can't provide expected handle for hint: {:?}", hint),
             )
         })
@@ -179,7 +190,7 @@ impl HandlesProvider for &mut ChannelMetadata {
 }
 
 impl TryFrom<Channel> for AsyncChannel {
-    type Error = std::io::Error;
+    type Error = io::Error;
 
     fn try_from(value: Channel) -> Result<Self, Self::Error> {
         let fd = value.inner;
@@ -203,7 +214,7 @@ impl AsyncWrite for AsyncChannel {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
+    ) -> Poll<Result<usize, io::Error>> {
         let project = self.project();
         let handles: Vec<PlatformHandle> = {
             let mut v = project.metadata.fds_to_send.lock().unwrap();
@@ -220,8 +231,13 @@ impl AsyncWrite for AsyncChannel {
                     project.metadata.defer_close_handles(handles);
                     Poll::Ready(Ok(sent))
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    project.metadata.fds_to_send.lock().unwrap().extend(handles.into_iter());
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    project
+                        .metadata
+                        .fds_to_send
+                        .lock()
+                        .unwrap()
+                        .extend(handles.into_iter());
                     project.inner.poll_write_ready(cx).map_ok(|_| 0)
                 }
                 Err(err) => Poll::Ready(Err(err)),
@@ -234,14 +250,14 @@ impl AsyncWrite for AsyncChannel {
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_flush(cx)
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_shutdown(cx)
     }
 }
@@ -251,7 +267,7 @@ impl AsyncRead for AsyncChannel {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    ) -> Poll<io::Result<()>> {
         let project = self.project();
         let mut fds = [0; MAX_FDS];
 
@@ -272,7 +288,7 @@ impl AsyncRead for AsyncChannel {
 
                     Poll::Ready(Ok(()))
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     project.inner.poll_read_ready(cx)
                 }
                 Err(err) => Poll::Ready(Err(err)),

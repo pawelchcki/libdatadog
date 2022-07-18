@@ -50,19 +50,26 @@ impl<Item, SinkItem> Transport<Item, SinkItem> {
 
 impl<CodecError, Item, SinkItem> Stream for Transport<Item, SinkItem>
 where
-    Item: for<'a> Deserialize<'a>,
+    Item: for<'a> Deserialize<'a> + HandlesReceive,
     CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
     DefaultSerdeFramed<Item, SinkItem>: Stream<Item = Result<Message<Item>, CodecError>>,
 {
     type Item = io::Result<Item>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<io::Result<Item>>> {
-        let projection = self.project();
-
-        projection
+        let this = self.project();
+        this
             .inner
             .poll_next(cx)
-            .map_ok(|message| projection.channel_metadata.message_received(message))
+            .map(|res| {
+                match res {
+                    Some(Ok(message)) => {
+                        Some(this.channel_metadata.unwrap_message(message).map_err(Into::into))
+                    },
+                    Some(Err(e)) => Some(Err(e.into())),
+                    None => None,
+                }
+            })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
@@ -83,10 +90,12 @@ where
     }
 
     fn start_send(self: Pin<&mut Self>, item: SinkItem) -> io::Result<()> {
-        let projection = self.project();
-        projection
+        let this = self.project();
+        let message = this.channel_metadata.create_message(item);
+
+        this
             .inner
-            .start_send(projection.channel_metadata.message_outgoing(item))
+            .start_send(message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 

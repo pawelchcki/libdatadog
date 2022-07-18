@@ -68,8 +68,8 @@ where
     fn deserialize(self: Pin<&mut Self>, src: &BytesMut) -> Result<Item, Self::Error> {
         let projection = self.project();
         let mut item = projection.codec.deserialize(src)?;
-        item.receive_handles(projection.metadata)
-            .map_err(|e| e.into())?;
+        // item.receive_handles(projection.metadata)
+        //     .map_err(|e| e.into())?;
         Ok(item)
     }
 }
