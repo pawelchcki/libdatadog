@@ -1,6 +1,6 @@
 use std::{io, time::{SystemTime, Duration}};
 
-use ddtelemetry::sockets::transport::{channel::{self, AsyncChannel}, handles::{HandlesMove, HandlesTransfer, HandlesReceive}, TransportWithHandles, fd_wrapper::ChannelMetadataCodec};
+use ddtelemetry::sockets::transport::{channel::{self, AsyncChannel}, handles::{TransferHandles, HandlesTransport, HandlesReceive}, TransportWithHandles, fd_wrapper::ChannelMetadataCodec};
 use tarpc::{server::{self, Channel}, context};
 use tokio_serde::formats::Bincode;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -17,10 +17,10 @@ use futures::{
     future::{self, Ready},
 };
 
-impl HandlesMove for WorldResponse {
+impl TransferHandles for WorldResponse {
 }
 
-impl HandlesMove for WorldRequest {
+impl TransferHandles for WorldRequest {
 }
 
 impl HandlesReceive for WorldRequest {

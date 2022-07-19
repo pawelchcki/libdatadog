@@ -19,7 +19,7 @@ use self::{
         AsyncChannel, Channel, ChannelMetadata, ChannelMetadataCodec, DefaultCodec, Message,
         PlatformHandle,
     },
-    handles::{HandlesMove, HandlesReceive},
+    handles::{TransferHandles},
 };
 
 pub mod channel;
@@ -50,7 +50,7 @@ impl<Item, SinkItem> Transport<Item, SinkItem> {
 
 impl<CodecError, Item, SinkItem> Stream for Transport<Item, SinkItem>
 where
-    Item: for<'a> Deserialize<'a> + HandlesReceive,
+    Item: for<'a> Deserialize<'a> + TransferHandles,
     CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
     DefaultSerdeFramed<Item, SinkItem>: Stream<Item = Result<Message<Item>, CodecError>>,
 {
@@ -76,7 +76,7 @@ where
 
 impl<CodecError, Item, SinkItem> Sink<SinkItem> for Transport<Item, SinkItem>
 where
-    SinkItem: Serialize + HandlesMove,
+    SinkItem: Serialize + TransferHandles,
     CodecError: Into<Box<dyn std::error::Error + Send + Sync>>,
     DefaultSerdeFramed<Item, SinkItem>: Sink<Message<SinkItem>, Error = CodecError>,
 {
@@ -134,8 +134,8 @@ pub type SymmetricalTransport<T> = Transport<T, T>;
 
 impl<Item, SinkItem> From<AsyncChannel> for Transport<Item, SinkItem>
 where
-    Item: for<'de> Deserialize<'de> + HandlesReceive,
-    SinkItem: Serialize + HandlesMove,
+    Item: for<'de> Deserialize<'de> + TransferHandles,
+    SinkItem: Serialize + TransferHandles,
 {
     fn from(channel: AsyncChannel) -> Self {
         let codec = ChannelMetadataCodec::from(&channel.metadata);
@@ -145,8 +145,8 @@ where
 
 impl<Item, SinkItem> TryFrom<Channel> for Transport<Item, SinkItem>
 where
-    Item: for<'de> Deserialize<'de> + HandlesReceive,
-    SinkItem: Serialize + HandlesMove,
+    Item: for<'de> Deserialize<'de> + TransferHandles,
+    SinkItem: Serialize + TransferHandles,
 {
     type Error = <AsyncChannel as TryFrom<Channel>>::Error;
 

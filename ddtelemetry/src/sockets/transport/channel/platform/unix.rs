@@ -22,7 +22,7 @@ use tokio_serde::{formats::MessagePack, Serializer};
 use crate::{
     fork::Forkable,
     sockets::transport::handles::{
-        BetterHandle, HandlesMove, HandlesProvider, HandlesReceive, HandlesTransfer,
+        BetterHandle, TransferHandles, HandlesTransport,
     },
 };
 
@@ -43,25 +43,20 @@ pub struct Message<Item> {
     pid: libc::pid_t,
 }
 
-impl<T> HandlesMove for Message<T>
+impl<T> TransferHandles for Message<T>
 where
-    T: HandlesMove,
+    T: TransferHandles,
 {
     fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
     where
-        M: HandlesTransfer,
+        M: HandlesTransport,
     {
         self.item.move_handles(mover)
     }
-}
 
-impl<T> HandlesReceive for Message<T>
-where
-    T: HandlesReceive,
-{
     fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
     where
-        P: HandlesProvider,
+        P: HandlesTransport,
     {
         self.item.receive_handles(provider)
     }
@@ -106,7 +101,7 @@ pub struct ChannelMetadata {
     pid: libc::pid_t, // must always be set to current Process ID
 }
 
-impl HandlesTransfer for &mut ChannelMetadata {
+impl HandlesTransport for &mut ChannelMetadata {
     type Error = io::Error;
 
     fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error> {
@@ -114,12 +109,21 @@ impl HandlesTransfer for &mut ChannelMetadata {
 
         Ok(())
     }
+
+    fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error> {
+        self.find_handle(hint).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("can't provide expected handle for hint: {:?}", hint),
+            )
+        })
+    }
 }
 
 impl ChannelMetadata {
     pub fn unwrap_message<T>(&mut self, message: Message<T>) -> Result<T, io::Error>
     where
-        T: HandlesReceive,
+        T: TransferHandles,
     {
         { // close all open file desriptors that were ACKed by the other party
             let mut fds_to_close = self.fds_to_close.lock().unwrap();
@@ -143,7 +147,7 @@ impl ChannelMetadata {
         Ok(item)
     }
 
-    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>  where T: HandlesMove {
+    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>  where T: TransferHandles {
         item.move_handles(&mut *self)?;
 
         let message = Message {
@@ -175,19 +179,6 @@ impl ChannelMetadata {
             Some(fd) => Some(unsafe { PlatformHandle::from_raw_fd(fd) }),
             None => None,
         }
-    }
-}
-
-impl HandlesProvider for &mut ChannelMetadata {
-    type Error = io::Error;
-
-    fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error> {
-        self.find_handle(hint).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("can't provide expected handle for hint: {:?}", hint),
-            )
-        })
     }
 }
 

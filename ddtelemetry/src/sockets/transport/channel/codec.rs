@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use tokio_serde::{formats::MessagePack, Deserializer, Serializer};
 
-use crate::sockets::transport::handles::{HandlesMove, HandlesReceive};
+use crate::sockets::transport::handles::{TransferHandles};
 
 use super::ChannelMetadata;
 
@@ -59,7 +59,7 @@ where
 
 impl<Codec, Item, SinkItem> Deserializer<Item> for ChannelMetadataCodec<Codec, Item, SinkItem>
 where
-    for<'a> Item: Deserialize<'a> + HandlesReceive,
+    for<'a> Item: Deserialize<'a>,
     Codec: Deserializer<Item>,
     <Codec as tokio_serde::Deserializer<Item>>::Error: From<std::io::Error>,
 {
@@ -73,7 +73,7 @@ where
 
 impl<Codec, Item, SinkItem> Serializer<SinkItem> for ChannelMetadataCodec<Codec, Item, SinkItem>
 where
-    SinkItem: Serialize + HandlesMove,
+    SinkItem: Serialize + TransferHandles,
     Codec: Serializer<SinkItem>,
 {
     type Error = Codec::Error;

@@ -6,7 +6,7 @@ use std::{
 
 use super::{
     channel,
-    handles::{BetterHandle, HandlesMove, HandlesReceive},
+    handles::{BetterHandle, TransferHandles},
 };
 use crate::{
     assert_child_exit, fork,
@@ -30,19 +30,17 @@ struct ExampleData {
     string: String,
 }
 
-impl super::handles::HandlesMove for ExampleData {
+impl super::handles::TransferHandles for ExampleData {
     fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
     where
-        M: super::handles::HandlesTransfer,
+        M: super::handles::HandlesTransport,
     {
         self.channel.move_handles(mover)
     }
-}
 
-impl super::handles::HandlesReceive for ExampleData {
     fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
     where
-        P: super::handles::HandlesProvider,
+        P: super::handles::HandlesTransport,
     {
         self.channel.receive_handles(provider)
     }
@@ -101,24 +99,23 @@ trait World {
 struct HelloServer;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-impl HandlesMove for WorldResponse {}
+impl TransferHandles for WorldResponse {}
 
-impl HandlesMove for WorldRequest {
+impl TransferHandles for WorldRequest {
     fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
     where
-        M: super::handles::HandlesTransfer,
+        M: super::handles::HandlesTransport,
     {
         match self {
             WorldRequest::Hello { name: _ } => Ok(()),
             WorldRequest::SendHandle { h } => mover.move_handle(h.clone()),
         }
     }
-}
 
-impl HandlesReceive for WorldRequest {
+
     fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
     where
-        P: super::handles::HandlesProvider,
+        P: super::handles::HandlesTransport,
     {
         match self {
             WorldRequest::SendHandle { h } => h.receive_handles(provider),
@@ -126,8 +123,6 @@ impl HandlesReceive for WorldRequest {
         }
     }
 }
-
-impl HandlesReceive for WorldResponse {}
 
 #[tarpc::server]
 impl World for HelloServer {
