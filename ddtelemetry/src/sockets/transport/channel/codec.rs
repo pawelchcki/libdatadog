@@ -9,9 +9,6 @@ use crate::sockets::transport::handles::{TransferHandles};
 
 use super::ChannelMetadata;
 
-pub type DefaultInnerCodec<Item, SinkItem> = MessagePack<Item, SinkItem>;
-
-pub type DefaultCodec<Item, SinkItem> = ChannelMetadataCodec<DefaultInnerCodec<Item, SinkItem>, Item, SinkItem>;
 
 #[derive(Clone)]
 #[pin_project]

@@ -16,7 +16,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 use self::{
     channel::{
-        AsyncChannel, Channel, ChannelMetadata, ChannelMetadataCodec, DefaultCodec, Message,
+        AsyncChannel, Channel, ChannelMetadata, DefaultCodec, Message,
         PlatformHandle,
     },
     handles::{TransferHandles},
@@ -138,7 +138,7 @@ where
     SinkItem: Serialize + TransferHandles,
 {
     fn from(channel: AsyncChannel) -> Self {
-        let codec = ChannelMetadataCodec::from(&channel.metadata);
+        let codec = DefaultCodec::default();
         new(channel, codec)
     }
 }

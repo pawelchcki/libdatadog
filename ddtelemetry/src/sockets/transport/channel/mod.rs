@@ -1,4 +1,5 @@
 mod platform;
 pub use platform::*;
-mod codec;
-pub use codec::*;
+use tokio_serde::formats::MessagePack;
+
+pub type DefaultCodec<Item, SinkItem> = MessagePack<Item, SinkItem>;
