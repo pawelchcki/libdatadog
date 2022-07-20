@@ -71,12 +71,12 @@ impl From<Channel> for PlatformHandle {
 }
 
 impl Channel {
-    pub fn pair() -> io::Result<(Self, Forkable<Self>)> {
+    pub fn pair() -> io::Result<(Self, Self)> {
         let (local, remote) = StdUnixStream::pair()?;
 
         Ok((
             Self::from_std(local),
-            Forkable::mark_as(Self::from_std(remote)),
+            Self::from_std(remote),
         ))
     }
 

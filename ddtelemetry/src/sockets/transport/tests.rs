@@ -52,22 +52,17 @@ fn test_basic_com() {
 
     let pid = fork::safer_fork(remote, |remote| {
         fork::tests::set_default_child_panic_handler();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = start_runtime();
+        let _g = runtime.enter();
 
-        let _guard = runtime.enter();
-
-        let remote: AsyncChannel = remote.take().try_into().unwrap();
-        let (some, _g) = channel::Channel::pair().unwrap();
+        let (ch, _) = channel::Channel::pair().unwrap();
 
         let data = ExampleData {
-            channel: BetterHandle::from(some),
+            channel: BetterHandle::from(ch),
             string: "test".to_owned(),
         };
 
-        let mut transport = SymmetricalTransport::from(remote);
+        let mut transport = SymmetricalTransport::try_from(remote).unwrap();
 
         runtime.block_on(transport.send(data)).unwrap();
     })
@@ -183,6 +178,7 @@ fn test_inprocess_rpc() {
 fn test_interprocess_rpc() {
     let (local, remote) = channel::Channel::pair().unwrap();
     let child = safer_fork(remote, |remote| {
+        fork::tests::set_default_child_panic_handler();
         let runtime = start_runtime();
         let _r = runtime.enter();
 

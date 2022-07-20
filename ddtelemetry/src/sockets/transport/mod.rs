@@ -157,17 +157,5 @@ where
     }
 }
 
-impl<Item, SinkItem> TryFrom<Forkable<Channel>> for Transport<Item, SinkItem>
-where
-    Item: for<'de> Deserialize<'de> + TransferHandles,
-    SinkItem: Serialize + TransferHandles,
-{
-    type Error = <AsyncChannel as TryFrom<Channel>>::Error;
-
-    fn try_from(channel: Forkable<Channel>) -> Result<Self, Self::Error> {
-        Ok(Self::from(AsyncChannel::try_from(channel.take())?))
-    }
-}
-
 #[cfg(test)]
 mod tests;
