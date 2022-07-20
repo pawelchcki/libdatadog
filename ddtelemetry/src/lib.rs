@@ -132,3 +132,4 @@ pub async fn push_telemetry(telemetry: &Telemetry<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 }
+

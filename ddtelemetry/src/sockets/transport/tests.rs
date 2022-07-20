@@ -1,7 +1,7 @@
 
 use std::{
     fs::File,
-    io::{self, Seek},
+    io::{self, Seek}, sync::Mutex,
 };
 
 use super::{
@@ -23,6 +23,7 @@ use tarpc::{
     server::{Channel},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
+use serial_test::serial;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ExampleData {
@@ -47,6 +48,7 @@ impl super::handles::TransferHandles for ExampleData {
 }
 
 #[test]
+// #[serial]
 fn test_basic_com() {
     let (local, remote) = channel::Channel::pair().unwrap();
 
@@ -68,18 +70,14 @@ fn test_basic_com() {
     })
     .unwrap();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let _guard = runtime.enter();
+    let runtime = start_runtime();
+    let _g = runtime.enter();
 
     let local: AsyncChannel = local.try_into().unwrap();
     let mut transport = SymmetricalTransport::from(local);
 
     let res: ExampleData = runtime.block_on(transport.next()).unwrap().unwrap();
-    println!("Received: {:?}", res);
-
+    assert_eq!(res.string, "test");
     assert_child_exit!(pid);
 }
 
@@ -148,6 +146,7 @@ impl World for HelloServer {
 }
 
 #[test]
+// #[serial]
 fn test_inprocess_rpc() {
     let runtime = start_runtime();
     let _r = runtime.enter();
@@ -175,6 +174,7 @@ fn test_inprocess_rpc() {
 }
 
 #[test]
+// #[serial]
 fn test_interprocess_rpc() {
     let (local, remote) = channel::Channel::pair().unwrap();
     let child = safer_fork(remote, |remote| {
@@ -217,12 +217,11 @@ fn start_runtime() -> tokio::runtime::Runtime {
         .with_max_level(tracing::Level::TRACE)
         .finish();
 
-    tracing::subscriber::set_global_default(collector).unwrap();
+    // tracing::subscriber::set_global_default(collector).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
-
     
     runtime
 }
