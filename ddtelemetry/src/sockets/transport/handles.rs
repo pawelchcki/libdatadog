@@ -13,20 +13,116 @@ pub trait HandlesTransport {
 }
 
 pub trait TransferHandles {
-    fn move_handles<M>(&self, _: M) -> Result<(), M::Error>
+    fn move_handles<Transport: HandlesTransport>(
+        &self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error>;
+
+    fn receive_handles<Transport: HandlesTransport>(
+        &mut self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error>;
+}
+
+mod transport_impls {
+    use super::{HandlesTransport, TransferHandles};
+
+    impl<T, E> TransferHandles for Result<T, E>
     where
-        M: HandlesTransport,
+        T: TransferHandles,
     {
-        Ok(())
+        fn move_handles<Transport>(&self, transport: Transport) -> Result<(), Transport::Error>
+        where
+            Transport: HandlesTransport,
+        {
+            match self {
+                Ok(i) => i.move_handles(transport),
+                Err(_) => Ok(()),
+            }
+        }
+
+        fn receive_handles<Transport>(
+            &mut self,
+            transport: Transport,
+        ) -> Result<(), Transport::Error>
+        where
+            Transport: HandlesTransport,
+        {
+            match self {
+                Ok(i) => i.receive_handles(transport),
+                Err(_) => Ok(()),
+            }
+        }
     }
 
-    fn receive_handles<P>(&mut self, _provider: P) -> Result<(), P::Error>
+    use tarpc::{ClientMessage, Request, Response};
+
+    impl<T: TransferHandles> TransferHandles for Response<T> {
+        fn move_handles<Transport: HandlesTransport>(
+            &self,
+            transport: Transport,
+        ) -> Result<(), Transport::Error> {
+            self.message.move_handles(transport)
+        }
+
+        fn receive_handles<Transport: HandlesTransport>(
+            &mut self,
+            transport: Transport,
+        ) -> Result<(), Transport::Error> {
+            self.message.receive_handles(transport)
+        }
+    }
+
+    impl<T> TransferHandles for ClientMessage<T>
     where
-        P: HandlesTransport,
+        T: TransferHandles,
     {
-        Ok(())
+        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
+        where
+            M: HandlesTransport,
+        {
+            match self {
+                ClientMessage::Request(r) => r.move_handles(mover),
+                ClientMessage::Cancel {
+                    trace_context: _,
+                    request_id: _,
+                } => Ok(()),
+                _ => Ok(()),
+            }
+        }
+        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+        where
+            P: HandlesTransport,
+        {
+            match self {
+                ClientMessage::Request(r) => r.receive_handles(provider),
+                ClientMessage::Cancel {
+                    trace_context: _,
+                    request_id: _,
+                } => Ok(()),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    impl<T: TransferHandles> TransferHandles for Request<T> {
+        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
+        where
+            P: HandlesTransport,
+        {
+            self.message.receive_handles(provider)
+        }
+
+        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
+        where
+            M: HandlesTransport,
+        {
+            self.message.move_handles(mover)
+        }
     }
 }
+
+pub use transport_impls::*;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BetterHandle<T> {
@@ -101,99 +197,3 @@ impl<T> TransferHandles for BetterHandle<T> {
         Ok(())
     }
 }
-
-mod tarpc_impl {
-    use super::{HandlesTransport, TransferHandles};
-
-    impl<T> TransferHandles for tarpc::Response<T>
-    where
-        T: TransferHandles,
-    {
-        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-        where
-            M: HandlesTransport,
-        {
-            if let Ok(message) = &self.message {
-                message.move_handles(mover)
-            } else {
-                Ok(())
-            }
-        }
-
-  
-
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: HandlesTransport,
-        {
-            if let Ok(message) = &mut self.message {
-                message.receive_handles(provider)?;
-            }
-            Ok(())
-        }
-    }
-
-    impl<T> TransferHandles for tarpc::ClientMessage<T>
-    where
-        T: TransferHandles,
-    {
-        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-        where
-            M: HandlesTransport,
-        {
-            match self {
-                tarpc::ClientMessage::Request(r) => r.move_handles(mover),
-                tarpc::ClientMessage::Cancel {
-                    trace_context: _,
-                    request_id: _,
-                } => Ok(()),
-                _ => Ok(()),
-            }
-        }
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: HandlesTransport,
-        {
-            match self {
-
-                tarpc::ClientMessage::Request(r) => r.receive_handles(provider),
-                tarpc::ClientMessage::Cancel {
-                    trace_context: _,
-                    request_id: _,
-                } => Ok(()),
-                _ => Ok(()),
-            }
-        }
-    }
-
-
-
-    impl<T> TransferHandles for tarpc::Request<T>
-    where
-        T: TransferHandles,
-    {
-        fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
-        where
-            P: HandlesTransport,
-        {
-            self.message.receive_handles(provider)
-        }
-
-        fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-    where
-        M: HandlesTransport,
-    {
-                self.message.move_handles(mover)
-
-    }
-
-        // fn move_handles<M>(&self, mover: M) -> Result<(), M::Error>
-        // where
-        //     M: HandlesTransport,
-        // {
-        //     self.message.move_handle(mover)
-        // }
-    }
-}
-
-pub use tarpc_impl::*;

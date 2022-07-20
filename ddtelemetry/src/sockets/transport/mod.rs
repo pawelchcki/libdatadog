@@ -14,6 +14,8 @@ use tokio_serde::Serializer;
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
+use crate::fork::Forkable;
+
 use self::{
     channel::{
         AsyncChannel, Channel, ChannelMetadata, DefaultCodec, Message,
@@ -152,6 +154,18 @@ where
 
     fn try_from(channel: Channel) -> Result<Self, Self::Error> {
         Ok(Self::from(AsyncChannel::try_from(channel)?))
+    }
+}
+
+impl<Item, SinkItem> TryFrom<Forkable<Channel>> for Transport<Item, SinkItem>
+where
+    Item: for<'de> Deserialize<'de> + TransferHandles,
+    SinkItem: Serialize + TransferHandles,
+{
+    type Error = <AsyncChannel as TryFrom<Channel>>::Error;
+
+    fn try_from(channel: Forkable<Channel>) -> Result<Self, Self::Error> {
+        Ok(Self::from(AsyncChannel::try_from(channel.take())?))
     }
 }
 

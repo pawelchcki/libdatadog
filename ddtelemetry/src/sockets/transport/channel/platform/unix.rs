@@ -20,7 +20,7 @@ use tokio::{
 use tokio_serde::{formats::MessagePack, Serializer};
 
 use crate::{
-    fork::Forkable,
+    fork::{Forkable, ForkSafe},
     sockets::transport::handles::{
         BetterHandle, TransferHandles, HandlesTransport,
     },
@@ -35,6 +35,8 @@ const MAX_FDS: usize = 20;
 pub struct Channel {
     inner: StdUnixStream,
 }
+
+impl ForkSafe for Channel {}
 
 #[derive(Deserialize, Serialize)]
 pub struct Message<Item> {
@@ -320,7 +322,7 @@ impl PlatformHandle {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
-                    "attempting to unwrap unitialized platform handle (fd: {} ({}))",
+                    "attempting to unwrap FD from unowned platform handle (fd: {} ({}))",
                     self.fd, fd
                 ),
             ));
@@ -337,7 +339,7 @@ struct PlatformHandleInner {
 impl PlatformHandleInner {
     fn leak(&mut self) -> RawFd {
         let fd = self.fd;
-        self.fd = -1; // prevend FD from being closed on drop
+        self.fd = -1; // prevent FD from being closed on drop
         fd
     }
 }
@@ -378,11 +380,11 @@ impl From<File> for PlatformHandle {
 impl TryFrom<PlatformHandle> for File {
     type Error = io::Error;
 
+    /// # Safety: handle try_unwrap_inner will ensure returned handle is initialized and only owned once
+    /// # Safety: all callers should ensure handle is a file handle
     fn try_from(handle: PlatformHandle) -> Result<Self, Self::Error> {
         let fd = handle.try_into_rawfd()?;
 
-        // Safety: handle try_unwrap_inner will ensure returned handle is initialized and only owned once
-        // Safety: all callers should  ensure handle is a file handle
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
