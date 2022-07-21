@@ -1,10 +1,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::File,
-    io,
+    io::{self, Write},
     os::unix::{
         net::UnixStream as StdUnixStream,
-        prelude::{FromRawFd, IntoRawFd, RawFd},
+        prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     },
     sync::{Arc, Mutex, RwLock},
     task::Poll,
@@ -20,10 +20,8 @@ use tokio::{
 use tokio_serde::{formats::MessagePack, Serializer};
 
 use crate::{
-    fork::{Forkable, ForkSafe},
-    sockets::transport::handles::{
-        BetterHandle, TransferHandles, HandlesTransport,
-    },
+    fork::{ForkSafe, Forkable},
+    sockets::transport::handles::{BetterHandle, HandlesTransport, TransferHandles},
 };
 
 /// sendfd crate's API is not able to resize the received FD container.
@@ -34,15 +32,61 @@ const MAX_FDS: usize = 20;
 #[derive(Debug)]
 pub struct Channel {
     inner: StdUnixStream,
+    drop_guard: DropGuard,
 }
+
+#[derive(Debug)]
+struct DropGuard {}
 
 impl ForkSafe for Channel {}
 
+impl Write for Channel {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Drop for DropGuard {
+    fn drop(&mut self) {
+        println!("{}: dropping channel", unsafe { libc::getpid() })
+    }
+}
+
+pub struct ChannelRef {
+    fd: RawFd,
+}
+
+impl Channel {
+    pub fn as_channel_ref(&self) -> ChannelRef {
+        ChannelRef {
+            fd: self.inner.as_raw_fd(),
+        }
+    }
+}
+
+impl ChannelRef {
+    pub fn close(self) {
+        unsafe { libc::close(self.fd); }
+    }
+}
+
+impl ForkSafe for ChannelRef{}
+
 #[derive(Deserialize, Serialize)]
 pub struct Message<Item> {
-    item: Item,
-    acked_handles: Vec<RawFd>,
-    pid: libc::pid_t,
+    pub item: Item,
+    pub acked_handles: Vec<RawFd>,
+    pub pid: libc::pid_t,
+}
+
+impl<Item> Message<Item> {
+    pub fn ref_item<'a>(&'a self) -> &'a Item {
+        &self.item
+    }
 }
 
 impl<T> TransferHandles for Message<T>
@@ -74,14 +118,14 @@ impl Channel {
     pub fn pair() -> io::Result<(Self, Self)> {
         let (local, remote) = StdUnixStream::pair()?;
 
-        Ok((
-            Self::from_std(local),
-            Self::from_std(remote),
-        ))
+        Ok((Self::from_std(local), Self::from_std(remote)))
     }
 
     fn from_std(s: StdUnixStream) -> Self {
-        Self { inner: s }
+        Self {
+            inner: s,
+            drop_guard: DropGuard {},
+        }
     }
 }
 
@@ -127,7 +171,8 @@ impl ChannelMetadata {
     where
         T: TransferHandles,
     {
-        { // close all open file desriptors that were ACKed by the other party
+        {
+            // close all open file desriptors that were ACKed by the other party
             let mut fds_to_close = self.fds_to_close.lock().unwrap();
             let mut fds_to_close: Vec<PlatformHandle> = message
                 .acked_handles
@@ -136,7 +181,7 @@ impl ChannelMetadata {
                 .collect();
 
             // if ACK came from the same PID, it means there is a duplicate PlatformHandle instance in the same
-            // process. Thus we should leak the handles
+            // process. Thus we should leak the handles allowing other PlatformHandle's to safely close
             if message.pid == self.pid {
                 fds_to_close.iter_mut().for_each(|h| {
                     h.leak();
@@ -149,7 +194,10 @@ impl ChannelMetadata {
         Ok(item)
     }
 
-    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>  where T: TransferHandles {
+    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>
+    where
+        T: TransferHandles,
+    {
         item.move_handles(&mut *self)?;
 
         let message = Message {

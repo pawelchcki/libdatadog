@@ -1,70 +1,126 @@
-use std::{io, time::{SystemTime, Duration}};
+use std::{
+    io,
+    time::{Duration, SystemTime}, sync::{atomic::AtomicU64, Arc},
+};
 
-use ddtelemetry::sockets::transport::{channel::{self, AsyncChannel}, handles::{TransferHandles, HandlesTransport, HandlesReceive}, TransportWithHandles, fd_wrapper::ChannelMetadataCodec};
-use tarpc::{server::{self, Channel}, context};
+use ddtelemetry::{
+    fork::safer_fork,
+    sockets::transport::{
+        channel::{self},
+        handles::{HandlesTransport, TransferHandles},
+        BlockingChannel, Transport,
+    },
+};
+use tarpc::{
+    context,
+    server::{self, Channel},
+};
 use tokio_serde::formats::Bincode;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tarpc::service]
 trait World {
     /// Returns a greeting for name.
-    async fn hello(name: String) -> String;
+    async fn hello(name: String) -> ();
 }
 
 #[derive(Clone)]
-struct HelloServer;
-use futures::{
-    future::{self, Ready},
-};
+struct HelloServer {
+    cnt: Arc<AtomicU64>
+}
+use futures::future::{self, Ready};
 
 impl TransferHandles for WorldResponse {
+    fn move_handles<Transport: HandlesTransport>(
+        &self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        Ok(())
+    }
+
+    fn receive_handles<Transport: HandlesTransport>(
+        &mut self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        Ok(())
+    }
 }
 
 impl TransferHandles for WorldRequest {
-}
+    fn move_handles<Transport: HandlesTransport>(
+        &self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        Ok(())
+    }
 
-impl HandlesReceive for WorldRequest {
+    fn receive_handles<Transport: HandlesTransport>(
+        &mut self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        Ok(())
+    }
 }
-
-impl HandlesReceive for WorldResponse {}
 
 impl World for HelloServer {
     // Each defined rpc generates two items in the trait, a fn that serves the RPC, and
     // an associated type representing the future output by the fn.
 
-    type HelloFut = Ready<String>;
+    type HelloFut = Ready<()>;
 
-    fn hello(self, _: tarpc::context::Context, name: String) -> Self::HelloFut {
-        future::ready(name)
+    fn hello(self, ctx: tarpc::context::Context, name: String) -> Self::HelloFut {
+        let cnt = self.cnt.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        println!("req: {}", cnt);
+        future::ready(())
     }
 }
 
-    fn setup_runtime()  {
-        let collector = tracing_subscriber::fmt()
-            .with_writer(io::stderr)
-            .with_span_events(FmtSpan::FULL)
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        tracing::subscriber::set_global_default(collector).unwrap();
+impl Default for HelloServer {
+    fn default() -> Self {
+        Self { cnt: Default::default() }
     }
+}
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    setup_runtime();
+fn setup_tracing() {
+    let collector = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_span_events(FmtSpan::FULL)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::set_global_default(collector).unwrap();
+}
+
+fn main() -> anyhow::Result<()> {
+    // setup_tracing();
 
     // let _guard = runtime.enter();
     let (local, remote) = channel::Channel::pair().unwrap();
+    let _child = safer_fork((local.as_channel_ref(), remote), |(r, remote)| 
+    {
+        r.close();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = runtime.enter();
+        let server =
+            tarpc::server::BaseChannel::with_defaults(Transport::try_from(remote).unwrap());
 
-    let remote = remote.take();
-    let server = build_server(local);
-    tokio::spawn(server.execute(HelloServer.serve()));
+        runtime.block_on(server.execute(HelloServer::default().serve()));
+    })
+    .unwrap();
 
-    let client = build_client(remote);
-    let mut ctx = context::current();
-    ctx.deadline = SystemTime::now() + Duration::from_secs(1000);
+    let mut local = BlockingChannel::from(local);
 
-    let hello = client.hello(ctx, "Stim".to_string()).await?;
+    for n in 0..200 {
+        local.send_and_forget(WorldRequest::Hello { name: "ping".to_owned() }).unwrap();
+        // println!("sent: {}", n);
+    }
+    
+    std::thread::sleep(Duration::from_secs(2));
+    drop(local);
+    println!("dropping {}, self: {}", _child, unsafe {libc::getpid()});
+    std::thread::sleep(Duration::from_secs(120));
 
-    println!("Echo: {:?}", hello);
     Ok(())
 }

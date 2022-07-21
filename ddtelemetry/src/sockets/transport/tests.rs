@@ -1,7 +1,7 @@
-
 use std::{
     fs::File,
-    io::{self, Seek}, sync::Mutex,
+    io::{self, Seek},
+    sync::Once,
 };
 
 use super::{
@@ -9,21 +9,15 @@ use super::{
     handles::{BetterHandle, TransferHandles},
 };
 use crate::{
-    assert_child_exit, fork::{self, safer_fork},
-    sockets::transport::{
-        channel::{AsyncChannel},
-        SymmetricalTransport, Transport,
-    },
+    assert_child_exit,
+    fork::{self, safer_fork},
+    sockets::transport::{channel::AsyncChannel, SymmetricalTransport, Transport},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use tarpc::{
-    context,
-    server::{Channel},
-};
+use tarpc::{context, server::Channel};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use serial_test::serial;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ExampleData {
@@ -50,6 +44,7 @@ impl super::handles::TransferHandles for ExampleData {
 #[test]
 // #[serial]
 fn test_basic_com() {
+    setup_trace_subscriber();
     let (local, remote) = channel::Channel::pair().unwrap();
 
     let pid = fork::safer_fork(remote, |remote| {
@@ -113,11 +108,10 @@ impl TransferHandles for WorldRequest {
         M: super::handles::HandlesTransport,
     {
         match self {
-            WorldRequest::ReadFromHandle  { h } => mover.move_handle(h.clone()),
+            WorldRequest::ReadFromHandle { h } => mover.move_handle(h.clone()),
             _ => Ok(()),
         }
     }
-
 
     fn receive_handles<P>(&mut self, provider: P) -> Result<(), P::Error>
     where
@@ -148,6 +142,8 @@ impl World for HelloServer {
 #[test]
 // #[serial]
 fn test_inprocess_rpc() {
+    setup_trace_subscriber();
+
     let runtime = start_runtime();
     let _r = runtime.enter();
 
@@ -176,16 +172,20 @@ fn test_inprocess_rpc() {
 #[test]
 // #[serial]
 fn test_interprocess_rpc() {
+    setup_trace_subscriber();
+
     let (local, remote) = channel::Channel::pair().unwrap();
     let child = safer_fork(remote, |remote| {
         fork::tests::set_default_child_panic_handler();
         let runtime = start_runtime();
         let _r = runtime.enter();
 
-        let server = tarpc::server::BaseChannel::with_defaults(Transport::try_from(remote).unwrap());
+        let server =
+            tarpc::server::BaseChannel::with_defaults(Transport::try_from(remote).unwrap());
         runtime.block_on(server.execute(HelloServer.serve()));
-    }).unwrap();
-    
+    })
+    .unwrap();
+
     let runtime = start_runtime();
     let _r = runtime.enter();
 
@@ -206,22 +206,28 @@ fn test_interprocess_rpc() {
     assert_eq!("Message sent using a FD", echoed);
     drop(client);
     assert_child_exit!(child);
-
 }
 
-fn start_runtime() -> tokio::runtime::Runtime {
-    // setup debug trace output
-    let collector = tracing_subscriber::fmt()
-        .with_writer(io::stdout)
-        .with_span_events(FmtSpan::FULL)
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
+static SET_COLLECTOR_ONCE: Once = Once::new();
 
-    // tracing::subscriber::set_global_default(collector).unwrap();
+fn setup_trace_subscriber() {
+    SET_COLLECTOR_ONCE.call_once(|| {
+        // setup debug trace output
+        let collector = tracing_subscriber::fmt()
+            .with_writer(io::stdout)
+            .with_span_events(FmtSpan::FULL)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::set_global_default(collector).unwrap();
+    });
+}
+
+
+fn start_runtime() -> tokio::runtime::Runtime {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
-    
+
     runtime
 }
