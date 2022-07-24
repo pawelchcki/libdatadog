@@ -8,7 +8,7 @@ pub trait HandlesTransport {
     /// The error type when some error occurs during serialization.
     type Error: Error;
 
-    fn move_handle<'h, T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error>;
+    fn move_handle<T>(self, handle: BetterHandle<T>) -> Result<(), Self::Error>;
     fn provide_handle(self, hint: &PlatformHandle) -> Result<PlatformHandle, Self::Error>;
 }
 

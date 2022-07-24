@@ -2,7 +2,7 @@ use std::{
     error::Error,
     io,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll}, sync::{Arc, Mutex},
 };
 
 use futures::{Sink, Stream};
@@ -41,7 +41,7 @@ pub struct Transport<Item, SinkItem> {
     #[pin]
     inner: DefaultSerdeFramed<Item, SinkItem>,
 
-    channel_metadata: ChannelMetadata,
+    channel_metadata: Arc<Mutex<ChannelMetadata>>,
 }
 
 impl<Item, SinkItem> Transport<Item, SinkItem> {
@@ -67,7 +67,7 @@ where
             .map(|res| {
                 match res {
                     Some(Ok(message)) => {
-                        Some(this.channel_metadata.unwrap_message(message).map_err(Into::into))
+                        Some(this.channel_metadata.lock().unwrap().unwrap_message(message).map_err(Into::into))
                     },
                     Some(Err(e)) => Some(Err(e.into())),
                     None => None,
@@ -94,7 +94,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: SinkItem) -> io::Result<()> {
         let this = self.project();
-        let message = this.channel_metadata.create_message(item)?;
+        let message = this.channel_metadata.lock().unwrap().create_message(item)?;
 
         this
             .inner
