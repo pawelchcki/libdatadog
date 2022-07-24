@@ -1,6 +1,6 @@
 use std::{
     io,
-    time::{Duration, SystemTime}, sync::{atomic::AtomicU64, Arc},
+    time::{Duration, SystemTime}, sync::{atomic::AtomicU64, Arc}, thread,
 };
 
 use ddtelemetry::{
@@ -70,7 +70,7 @@ impl World for HelloServer {
 
     fn hello(self, ctx: tarpc::context::Context, name: String) -> Self::HelloFut {
         let cnt = self.cnt.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        println!("req: {}", cnt);
+        println!("req: {} - len: {}", cnt, name.len());
         future::ready(())
     }
 }
@@ -91,7 +91,7 @@ fn setup_tracing() {
 }
 
 fn main() -> anyhow::Result<()> {
-    // setup_tracing();
+    setup_tracing();
 
     // let _guard = runtime.enter();
     let pair = channel::Channel::pair().unwrap();
@@ -110,15 +110,32 @@ fn main() -> anyhow::Result<()> {
     })
     .unwrap();
 
-    let mut local = BlockingChannel::from(pair.local().unwrap());
 
-    for n in 0..100000 {
-        local.send_and_forget(WorldRequest::Hello { name: "ping".to_owned() }).unwrap();
-        println!("sent: {}", n);
+    let ch = pair.local().unwrap();
+    let ch = BlockingChannel::from(ch);
+
+    let mut joins = vec![];
+    for tn in 0..10 {
+        let mut ch = ch.clone();
+        let th = thread::spawn(move || {
+
+            for n in (10000*tn)..(10000*(tn+1)) {
+                ch.send_and_forget(WorldRequest::Hello { name: (0..10000).map(|_| "ping".to_owned()).collect() }).unwrap();
+                // println!("sent: {}", n);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            println!("Finished sending");
+            drop(ch);
+        });
+        joins.push(th);
     }
+
+    for th in joins {
+        th.join();
+    }
+    drop(ch);
     
-    std::thread::sleep(Duration::from_secs(2));
-    drop(local);
+   
     println!("dropping {}, self: {}", _child, unsafe {libc::getpid()});
     std::thread::sleep(Duration::from_secs(120));
 

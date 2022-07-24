@@ -26,6 +26,12 @@ pub struct BlockingChannel<Item> {
     codec: FramedBlocking<Message<ClientMessage<Item>>>,
 }
 
+impl<Item> Clone for BlockingChannel<Item> {
+    fn clone(&self) -> Self {
+        Self { channel: self.channel.clone(), pid: self.pid.clone(), requests_id: self.requests_id.clone(), codec: self.codec.clone() }
+    }
+}
+
 impl<Item> From<Channel> for BlockingChannel<Item> {
     fn from(c: Channel) -> Self {
         let pid = unsafe { libc::getpid() };
@@ -41,6 +47,12 @@ impl<Item> From<Channel> for BlockingChannel<Item> {
 pub struct FramedBlocking<Item> {
     len: LengthDelimitedCodec,
     codec: Pin<Box<SymmetricalMessagePack<Item>>>,
+}
+
+impl<Item> Clone for FramedBlocking<Item> {
+    fn clone(&self) -> Self {
+        Self { len: self.len.clone(), codec: Box::pin(Default::default()) }
+    }
 }
 
 impl<Item> Default for FramedBlocking<Item> {
