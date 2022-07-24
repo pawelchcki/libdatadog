@@ -9,22 +9,20 @@ use pretty_assertions::{assert_eq, assert_ne};
 
 use crate::sockets::transport::channel::MAX_FDS;
 
-use super::{ChannelMetadata, PlatformHandle};
+use super::{ChannelMetadata, PlatformHandle, UnsafePlatformHandle};
 
 fn mock_handle(mock_fd: RawFd) -> PlatformHandle {
     unsafe {
-        let handle = PlatformHandle::from_raw_fd(mock_fd);
+        let handle = UnsafePlatformHandle::from_raw_fd(mock_fd);
         handle.leak(); // avoid platform handle calling close on non existing fd
-        handle
+        handle.unchecked_into()
     }
 }
 
 fn assert_platform_handle_is_valid_file(handle: PlatformHandle) -> PlatformHandle {
-    let handle = handle.claim_valid().unwrap();
-    let mut file = unsafe { File::from_raw_fd(handle.leak()) };
+    let handle = handle.try_claim().unwrap();
+    let mut file = unsafe { File::from_raw_fd(handle.try_leak().unwrap()) };
 
-    // Should return none, as handle's FD was leaked
-    assert_eq!(true, handle.claim_valid().is_none());
     write!(file, "test_string").unwrap();
     file.rewind().unwrap();
 
@@ -109,9 +107,6 @@ fn test_channel_metadata_only_provides_valid_owned() {
     let final_ordered_fds_list: Vec<RawFd> = handles.iter().map(AsRawFd::as_raw_fd).collect();
     assert_eq!(file_fds, final_ordered_fds_list);
 
-    // let mut expected_open_file_descriptors = reference.clone();
-    // expected_open_file_descriptors.extend(file_fds.into_iter().map(|f| (f, String::new())));
-
     assert_file_descriptors_unchanged(&reference_open_files, None);
 
     // test and dispose of all handles
@@ -119,6 +114,7 @@ fn test_channel_metadata_only_provides_valid_owned() {
         assert_platform_handle_is_valid_file(handle);
     }
 
-    assert_file_descriptors_unchanged(&reference_open_files, None);
     assert_file_descriptors_unchanged(&reference, None);
 }
+
+

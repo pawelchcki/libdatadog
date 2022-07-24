@@ -1,20 +1,22 @@
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, VecDeque},
     fs::File,
     io::{self, Write},
-    ops::DerefMut,
     os::unix::{
         net::UnixStream as StdUnixStream,
         prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     },
     sync::{
-        atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering},
-        Arc, Mutex, RwLock,
+        atomic::{AtomicI32, Ordering},
+        Arc, Mutex,
     },
     task::Poll,
 };
 
-use lazy_static::__Deref;
+#[cfg(test)]
+mod tests;
+
 use sendfd::{RecvWithFd, SendWithFd};
 
 use serde::{Deserialize, Serialize};
@@ -22,11 +24,12 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::UnixStream,
 };
-use tokio_serde::{formats::MessagePack, Serializer};
 
 use crate::{
-    fork::{getpid, ForkSafe, Forkable},
-    sockets::transport::handles::{BetterHandle, HandlesTransport, TransferHandles},
+    fork::{getpid, ForkSafe},
+    sockets::transport::handles::{
+        BetterHandle, BorrowedHandle, HandlesTransport, TransferHandles,
+    },
 };
 
 /// sendfd crate's API is not able to resize the received FD container.
@@ -34,54 +37,25 @@ use crate::{
 /// TODO: sendfd should be rewriten, fixed to handle cases like these better.
 pub const MAX_FDS: usize = 20;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Channel {
-    inner: StdUnixStream,
-    drop_guard: DropGuard,
+    inner: BetterHandle<StdUnixStream>,
 }
 
-#[derive(Debug)]
-struct DropGuard {}
-
-impl ForkSafe for Channel {}
+impl<T> ForkSafe for BetterHandle<T> {}
 
 impl Write for Channel {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        let mut h = self.inner.borrow_into()?;
+        h.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        let mut h = self.inner.borrow_into()?;
+
+        h.flush()
     }
 }
-
-impl Drop for DropGuard {
-    fn drop(&mut self) {
-        println!("{}: dropping channel", unsafe { libc::getpid() })
-    }
-}
-
-pub struct ChannelRef {
-    fd: RawFd,
-}
-
-impl Channel {
-    pub fn as_channel_ref(&self) -> ChannelRef {
-        ChannelRef {
-            fd: self.inner.as_raw_fd(),
-        }
-    }
-}
-
-impl ChannelRef {
-    pub fn close(self) {
-        unsafe {
-            libc::close(self.fd);
-        }
-    }
-}
-
-impl ForkSafe for ChannelRef {}
 
 #[derive(Deserialize, Serialize)]
 pub struct Message<Item> {
@@ -117,22 +91,59 @@ where
 
 impl From<Channel> for PlatformHandle {
     fn from(c: Channel) -> Self {
-        unsafe { PlatformHandle::from_raw_fd(c.inner.into_raw_fd()) }
+        c.inner.into()
     }
 }
 
-impl Channel {
-    pub fn pair() -> io::Result<(Self, Self)> {
-        let (local, remote) = StdUnixStream::pair()?;
+#[derive(Debug)]
+pub struct ChannelPair(PlatformHandle, PlatformHandle);
 
-        Ok((Self::from_std(local), Self::from_std(remote)))
+impl ChannelPair {
+    pub fn local(&self) -> Result<Channel, std::io::Error> {
+        unsafe {
+            self.1.try_steal().unwrap_or_default(); 
+            Ok(Channel::from(BetterHandle::from_handle(self.0.try_steal()?)))
+        }
+    }
+    pub fn remote(&self) -> Result<Channel, std::io::Error> {
+        unsafe {
+            self.0.try_steal().unwrap_or_default(); 
+            Ok(Channel::from(BetterHandle::from_handle(self.1.try_steal()?)))
+        }
     }
 
-    fn from_std(s: StdUnixStream) -> Self {
-        Self {
-            inner: s,
-            drop_guard: DropGuard {},
+    pub fn pair(self) -> Result<(Channel, Channel), std::io::Error> {
+        unsafe {
+            Ok((Channel::from(BetterHandle::from_handle(self.0.try_steal()?)),
+            Channel::from(BetterHandle::from_handle(self.1.try_steal()?))))
         }
+    }
+}
+
+impl<T> From<T> for PlatformHandle where T: IntoRawFd {
+    fn from(h: T) -> Self {
+        unsafe { PlatformHandle::from_raw_fd(h.into_raw_fd()) }
+    }
+}
+
+impl ForkSafe for &ChannelPair {}
+
+impl Channel {
+    pub fn pair() -> io::Result<ChannelPair> {
+        let (local, remote) = StdUnixStream::pair()?;
+
+        unsafe {
+            Ok(ChannelPair(
+                PlatformHandle::from_raw_fd(local.into_raw_fd()),
+                PlatformHandle::from_raw_fd(remote.into_raw_fd()),
+            ))
+        }
+    }
+}
+
+impl From<BetterHandle<StdUnixStream>> for Channel {
+    fn from(h: BetterHandle<StdUnixStream>) -> Self {
+        Channel { inner: h }
     }
 }
 
@@ -192,7 +203,7 @@ impl ChannelMetadata {
     {
         {
             // close all open file desriptors that were ACKed by the other party
-            let mut fds_to_close: Vec<PlatformHandle> = message
+            let fds_to_close: Vec<PlatformHandle> = message
                 .acked_handles
                 .into_iter()
                 .flat_map(|fd| self.fds_to_close.remove(&fd))
@@ -201,9 +212,9 @@ impl ChannelMetadata {
             // if ACK came from the same PID, it means there is a duplicate PlatformHandle instance in the same
             // process. Thus we should leak the handles allowing other PlatformHandle's to safely close
             if message.pid == self.pid {
-                fds_to_close.iter_mut().for_each(|h| {
-                    h.leak();
-                });
+                for h in fds_to_close.into_iter() {
+                    h.try_leak()?;
+                }
             }
         }
         let mut item = message.item;
@@ -242,14 +253,17 @@ impl ChannelMetadata {
     }
 
     pub(crate) fn drain_to_send(&mut self) -> Vec<PlatformHandle> {
-        let drain = self.fds_to_send
+        let drain = self
+            .fds_to_send
             .drain(..)
-            .filter_map(|h| h.claim_valid());
-            
-        
-        let mut cnt: i32 = MAX_FDS.try_into().unwrap_or(i32::MAX); 
+            .filter_map(|h| h.try_claim().ok());
 
-        let (to_send, leftover) = drain.partition(|_| { cnt-=1; cnt >= 0 });
+        let mut cnt: i32 = MAX_FDS.try_into().unwrap_or(i32::MAX);
+
+        let (to_send, leftover) = drain.partition(|_| {
+            cnt -= 1;
+            cnt >= 0
+        });
         self.reenqueue_for_sending(leftover);
 
         to_send
@@ -273,7 +287,8 @@ impl TryFrom<Channel> for AsyncChannel {
     type Error = io::Error;
 
     fn try_from(value: Channel) -> Result<Self, Self::Error> {
-        let fd = value.inner;
+        let fd = value.inner.try_unwrap_into()?;
+
         fd.set_nonblocking(true)?;
         Ok(AsyncChannel {
             inner: UnixStream::from_std(fd)?,
@@ -368,25 +383,102 @@ impl AsyncRead for AsyncChannel {
     }
 }
 
+pub type NativeRawHandle = RawFd;
+
+pub trait FromNativeRawHandle: FromRawFd {
+    unsafe fn from_raw_native_handle(handle: NativeRawHandle) -> Self;
+}
+
+impl<T> FromNativeRawHandle for T
+where
+    T: FromRawFd + Sized,
+{
+    unsafe fn from_raw_native_handle(handle: NativeRawHandle) -> Self {
+        FromRawFd::from_raw_fd(handle)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PlatformHandle {
-    fd: RawFd, // Just an fd number to be used as reference, not for accessing actuall fd
+    fd: RawFd, // Just an fd number to be used as reference, not for accessing actual fd
     #[serde(skip)]
     inner: Arc<PlatformHandleInner>,
 }
 
+///
 impl PlatformHandle {
-    pub fn leak(&self) -> RawFd {
-        self.inner.leak()
+    pub fn try_leak(self) -> Result<RawFd, io::Error> {
+        let inner = self.inner.try_unwrap_valid()?;
+
+        Ok(unsafe { inner.leak() })
     }
 
-    /// Creates a new PlatformHandle, transferring the ownership of underlying FD if FD is valid
-    pub fn claim_valid(&self) -> Option<PlatformHandle> {
-        let handle = unsafe { PlatformHandle::from_raw_fd(self.leak()) };
-        if handle.inner.is_valid() {
-            Some(handle)
-        } else {
-            None
+    pub unsafe fn try_unwrap_into<T>(self) -> Result<T, io::Error>
+    where
+        T: FromRawFd,
+    {
+        let fd: RawFd = self.inner.try_unwrap_valid()?.leak();
+        Ok(FromRawFd::from_raw_fd(fd))
+    }
+
+    pub fn try_clone_valid(&self) -> Result<Self, io::Error> {
+        Ok(Self {
+            inner: self.inner.clone(),
+            fd: self.inner.as_raw_fd(),
+        })
+    }
+
+    pub unsafe fn try_borrow_into<T>(&self) -> Result<T, io::Error>
+    where
+        T: FromRawFd,
+    {
+        let fd: RawFd = self.inner.try_access_valid()?.as_raw_fd();
+        Ok(FromRawFd::from_raw_fd(fd))
+    }
+
+    /// Returns new instance, checking if inner handle is only referenced once and is valid returns error if not
+    pub fn try_claim(self) -> Result<Self, io::Error> {
+        let inner = Arc::new(self.inner.try_unwrap_valid()?);
+        let fd = inner.as_raw_fd();
+        Ok(Self { inner, fd })
+    }
+
+    pub unsafe fn try_steal(&self) -> Result<Self, io::Error> {
+        let inner = Arc::new(self.inner.try_steal()?);
+        let fd = inner.as_raw_fd();
+        Ok(Self {inner, fd})
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnsafePlatformHandle(PlatformHandle);
+
+impl UnsafePlatformHandle {
+    pub unsafe fn leak(&self) -> RawFd {
+        unsafe { self.0.inner.leak() }
+    }
+
+    pub unsafe fn try_claim_into<T>(self) -> Result<T, io::Error>
+    where
+        T: FromRawFd,
+    {
+        let fd: RawFd = self.0.inner.try_claim()?.as_raw_fd();
+        Ok(FromRawFd::from_raw_fd(fd))
+    }
+
+    /// Creates new instance with transfered ownership of a valid handle
+    pub unsafe fn try_claim(&self) -> Result<PlatformHandle, io::Error> {
+        let inner = Arc::new(self.0.inner.try_claim()?);
+        Ok(PlatformHandle {
+            inner,
+            fd: self.0.fd,
+        })
+    }
+
+    pub unsafe fn unchecked_into(self) -> PlatformHandle {
+        PlatformHandle {
+            inner: self.0.inner,
+            fd: self.0.fd,
         }
     }
 }
@@ -398,24 +490,16 @@ impl FromRawFd for PlatformHandle {
     /// # have exclusive ownership of the file descriptor
     ///
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let inner = Arc::new(PlatformHandleInner::new(fd));
+        let inner = Arc::new(PlatformHandleInner::from_raw_fd(fd));
         Self { fd, inner }
     }
 }
 
-impl PlatformHandle {
-    fn try_into_rawfd(self: PlatformHandle) -> Result<RawFd, io::Error> {
-        let fd = self.inner.leak();
-        if fd < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "attempting to unwrap FD from unowned platform handle (fd: {} ({}))",
-                    self.fd, fd
-                ),
-            ));
-        }
-        Ok(fd)
+impl PlatformHandle {}
+
+impl FromRawFd for UnsafePlatformHandle {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self(PlatformHandle::from_raw_fd(fd))
     }
 }
 
@@ -431,25 +515,83 @@ struct PlatformHandleInner {
 }
 
 impl PlatformHandleInner {
-    pub fn leak(&self) -> RawFd {
+    #[inline]
+    pub unsafe fn leak(&self) -> RawFd {
         // prevent FD from being closed on drop
         self.fd.swap(-1, Ordering::AcqRel)
     }
 
+    #[inline]
     pub fn is_valid(&self) -> bool {
-        self.fd.load(Ordering::Acquire) > 0
+        self.as_raw_fd() >= 0
     }
 
-    pub fn new(fd: RawFd) -> Self {
-        Self {
-            fd: AtomicI32::new(fd),
+    /// Transfers ownership of the FD into a new instance
+    /// Old instance effectively no longer will be able to use the FD
+    ///
+    /// Returns error if FD instance was unowned or invalid
+    pub unsafe fn try_claim(&self) -> Result<Self, io::Error> {
+        let claim = Self::from_raw_fd(self.leak());
+        claim.try_access_valid()?;
+        Ok(claim)
+    }
+
+    /// Transfers ownership of the FD into a new instance
+    /// Old instance effectively no longer will be able to use the FD
+    ///
+    /// Returns error if FD instance was unowned or invalid
+    pub unsafe fn try_steal(&self) -> Result<Self, io::Error> {
+        let claim = Self::from_raw_fd(self.leak());
+        claim.try_access_valid()?;
+        Ok(claim)
+    }
+
+    fn try_clone_valid(self: &Arc<Self>) -> Result<Arc<Self>, io::Error> {
+        let handle = Arc::clone(self);
+        handle.try_access_valid()?;
+        Ok(handle)
+    }
+
+    pub fn try_unwrap_valid(self: Arc<Self>) -> Result<Self, io::Error> {
+        let handle = Arc::try_unwrap(self).map_err(|inner| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "attempting to unwrap FD from shared platform handle (fd: {})",
+                    inner.as_raw_fd()
+                ),
+            )
+        })?;
+        handle.try_access_valid()?;
+        Ok(handle)
+    }
+
+    pub fn try_access_valid(&self) -> Result<&Self, io::Error> {
+        if !self.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "attempting to accesss FD from unowned platform handle (fd: {})",
+                    self.as_raw_fd()
+                ),
+            ));
         }
+        Ok(self)
     }
 }
 
 impl AsRawFd for PlatformHandleInner {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.fd.load(Ordering::Acquire)
+    }
+}
+
+impl FromRawFd for PlatformHandleInner {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self {
+            fd: AtomicI32::new(fd),
+        }
     }
 }
 
@@ -471,32 +613,14 @@ impl Default for PlatformHandle {
 
 impl Drop for PlatformHandleInner {
     fn drop(&mut self) {
-        let fd = self.leak();
-        if fd > 0 {
+        let fd = unsafe { self.leak() };
+        println!("No wporzo {}", fd);
+
+        if fd >= 0 {
             unsafe {
-                //TODO handle libc close errors
-                libc::close(fd);
+                println!("CJK {}", fd);
+                let _ = libc::close(fd);
             }
         }
-    }
-}
-
-impl<T> From<T> for PlatformHandle where T: IntoRawFd {
-    fn from(p: T) -> Self {
-        {
-            unsafe { PlatformHandle::from_raw_fd(p.into_raw_fd()) }
-        }
-    }
-}
-
-impl TryFrom<PlatformHandle> for File {
-    type Error = io::Error;
-
-    /// # Safety: handle try_unwrap_inner will ensure returned handle is initialized and only owned once
-    /// # Safety: all callers should ensure handle is a file handle
-    fn try_from(handle: PlatformHandle) -> Result<Self, Self::Error> {
-        let fd = handle.try_into_rawfd()?;
-
-        Ok(unsafe { File::from_raw_fd(fd) })
     }
 }

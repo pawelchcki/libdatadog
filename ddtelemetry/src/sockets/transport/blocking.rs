@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU64, AtomicUsize},
         Arc,
     },
-    time::SystemTime,
+    time::SystemTime, os::unix::{prelude::{AsRawFd, FromRawFd}, net::UnixStream},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -19,19 +19,21 @@ use super::{
     handles::TransferHandles,
 };
 
-pub struct BlockingChannel {
+pub struct BlockingChannel<Item> {
     channel: Channel,
     pid: libc::pid_t,
     requests_id: Arc<AtomicU64>,
+    codec: FramedBlocking<Message<ClientMessage<Item>>>,
 }
 
-impl From<Channel> for BlockingChannel {
+impl<Item> From<Channel> for BlockingChannel<Item> {
     fn from(c: Channel) -> Self {
         let pid = unsafe { libc::getpid() };
         BlockingChannel {
             channel: c,
             pid: pid,
             requests_id: Arc::from(AtomicU64::new(0)),
+            codec: FramedBlocking::default()
         }
     }
 }
@@ -102,13 +104,12 @@ where
     }
 }
 
-impl BlockingChannel {
-    pub fn send_and_forget<T>(&mut self, req: T) -> Result<(), io::Error>
-    where
-        T: Serialize + TransferHandles,
+impl<Item> BlockingChannel<Item>   where
+Item: Serialize + TransferHandles {
+    pub fn send_and_forget(&mut self, req: Item) -> Result<(), io::Error>
     {
         let mut context = context::current();
-        context.deadline = SystemTime::now();
+        context.deadline = SystemTime::UNIX_EPOCH;
         let request_id = self
             .requests_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -119,11 +120,20 @@ impl BlockingChannel {
         });
 
         let msg = self.create_message(req)?;
-        let mut enc = FramedBlocking::default();
         let mut buf = BytesMut::new();
-        enc.encode(msg, &mut buf)?;
+        self.codec.encode(msg, &mut buf)?;
 
         self.channel.write_all(&buf)
+    }
+
+    pub fn read_to_dev_null(&mut self) -> Result<(), io::Error>
+    {
+        // let fd = self.channel.as_raw_fd();
+
+        // UnixStream::from_raw_fd(fd)
+        // self.channel.read
+
+        Ok(())
     }
 
     pub fn unwrap_message<T>(&mut self, message: Message<T>) -> Result<T, io::Error>

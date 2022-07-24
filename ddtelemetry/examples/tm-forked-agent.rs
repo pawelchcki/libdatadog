@@ -94,10 +94,10 @@ fn main() -> anyhow::Result<()> {
     // setup_tracing();
 
     // let _guard = runtime.enter();
-    let (local, remote) = channel::Channel::pair().unwrap();
-    let _child = safer_fork((local.as_channel_ref(), remote), |(r, remote)| 
+    let pair = channel::Channel::pair().unwrap();
+    let _child = safer_fork(&pair, |pair| 
     {
-        r.close();
+        let remote = pair.remote().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -110,11 +110,11 @@ fn main() -> anyhow::Result<()> {
     })
     .unwrap();
 
-    let mut local = BlockingChannel::from(local);
+    let mut local = BlockingChannel::from(pair.local().unwrap());
 
-    for n in 0..200 {
+    for n in 0..100000 {
         local.send_and_forget(WorldRequest::Hello { name: "ping".to_owned() }).unwrap();
-        // println!("sent: {}", n);
+        println!("sent: {}", n);
     }
     
     std::thread::sleep(Duration::from_secs(2));

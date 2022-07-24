@@ -1,8 +1,15 @@
-use std::{error::Error, fs::File, marker::PhantomData};
+use std::{
+    error::Error,
+    fs::File,
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::DerefMut,
+    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd},
+};
 
 use serde::{Deserialize, Serialize};
 
-use super::channel::PlatformHandle;
+use super::channel::{FromNativeRawHandle, PlatformHandle};
 
 pub trait HandlesTransport {
     /// The error type when some error occurs during serialization.
@@ -130,6 +137,28 @@ pub struct BetterHandle<T> {
     phantom: PhantomData<T>,
 }
 
+impl<T> BetterHandle<T>
+where
+    T: FromNativeRawHandle + IntoRawFd,
+{
+    pub fn try_unwrap_into(self) -> Result<T, std::io::Error> {
+        Ok(unsafe { self.inner.try_unwrap_into()? })
+    }
+
+    pub fn borrow_into(&self) -> Result<BorrowedHandle<T>, std::io::Error> {
+        let platform_handle = self.inner.try_clone_valid()?;
+        let instance = unsafe { MaybeUninit::new(platform_handle.try_borrow_into()?) };
+        Ok(BorrowedHandle {
+            inner: instance,
+            platform_handle,
+        })
+    }
+
+    pub unsafe fn from_handle(h: PlatformHandle) -> Self {
+        Self { inner: h, phantom: PhantomData }
+    }
+}
+
 impl<T> Clone for BetterHandle<T> {
     fn clone(&self) -> Self {
         Self {
@@ -139,15 +168,43 @@ impl<T> Clone for BetterHandle<T> {
     }
 }
 
-impl<T> From<T> for BetterHandle<T>
+pub struct BorrowedHandle<T>
 where
-    T: Into<PlatformHandle>,
+    T: IntoRawFd,
 {
-    fn from(h: T) -> Self {
-        Self {
-            inner: h.into(),
-            phantom: PhantomData,
-        }
+    platform_handle: PlatformHandle,
+    inner: MaybeUninit<T>,
+}
+
+impl<T> core::ops::Deref for BorrowedHandle<T>
+where
+    T: IntoRawFd,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.inner.assume_init_ref() }
+    }
+}
+
+impl<T> DerefMut for BorrowedHandle<T>
+where
+    T: IntoRawFd,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.inner.assume_init_mut() }
+    }
+}
+
+impl<T> Drop for BorrowedHandle<T>
+where
+    T: IntoRawFd,
+{
+    fn drop(&mut self) {
+        let uninit = MaybeUninit::uninit();
+        let inner = std::mem::replace(&mut self.inner, uninit);
+        let inner = unsafe { inner.assume_init() };
+        inner.into_raw_fd(); // leak handle knowing it was just a reference
     }
 }
 
@@ -173,10 +230,10 @@ impl<T> BetterHandle<T> {
 }
 
 impl TryFrom<BetterHandle<File>> for File {
-    type Error = <File as TryFrom<PlatformHandle>>::Error;
+    type Error = std::io::Error;
 
     fn try_from(value: BetterHandle<File>) -> Result<Self, Self::Error> {
-        value.inner.try_into()
+        Ok(unsafe { value.inner.try_unwrap_into()? })
     }
 }
 
