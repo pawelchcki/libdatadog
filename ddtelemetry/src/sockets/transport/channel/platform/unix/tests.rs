@@ -9,19 +9,21 @@ use pretty_assertions::{assert_eq, assert_ne};
 
 use crate::sockets::transport::channel::MAX_FDS;
 
-use super::{ChannelMetadata, PlatformHandle, UnsafePlatformHandle};
+use super::{ChannelMetadata, PlatformHandle};
 
-fn mock_handle(mock_fd: RawFd) -> PlatformHandle {
+fn leaked_handle() -> PlatformHandle<RawFd> {
+    let file = tempfile::tempfile().unwrap();
+    let handle = PlatformHandle::from(file);
     unsafe {
-        let handle = UnsafePlatformHandle::from_raw_fd(mock_fd);
-        handle.leak(); // avoid platform handle calling close on non existing fd
-        handle.unchecked_into()
+        handle.try_steal().unwrap();
     }
+
+    handle.to_rawfd_type()
 }
 
-fn assert_platform_handle_is_valid_file(handle: PlatformHandle) -> PlatformHandle {
+fn assert_platform_handle_is_valid_file(handle: PlatformHandle<RawFd>) -> PlatformHandle<RawFd> {
     let handle = handle.try_claim().unwrap();
-    let mut file = unsafe { File::from_raw_fd(handle.try_leak().unwrap()) };
+    let mut file: File = unsafe { handle.to_any_type().try_unwrap_into().unwrap() };
 
     write!(file, "test_string").unwrap();
     file.rewind().unwrap();
@@ -31,7 +33,7 @@ fn assert_platform_handle_is_valid_file(handle: PlatformHandle) -> PlatformHandl
     assert_eq!("test_string", data);
 
     file.rewind().unwrap();
-    file.into()
+    PlatformHandle::from(file).to_rawfd_type()
 }
 
 fn get_open_file_descriptors(
@@ -69,9 +71,9 @@ fn test_channel_metadata_only_provides_valid_owned() {
     let mut meta = ChannelMetadata::default();
 
     // enqueue invalid platform handles those should be dropped before sending
-    (-1..10)
-        .map(mock_handle)
-        .for_each(|h| meta.enqueue_for_sending(h));
+    for h in (0..10) {
+        meta.enqueue_for_sending(leaked_handle())
+    }
 
     // create real handles
     let files: Vec<File> = (0..)
@@ -87,7 +89,7 @@ fn test_channel_metadata_only_provides_valid_owned() {
         .into_iter()
         .for_each(|f| meta.enqueue_for_sending(f.into()));
 
-    let first_batch: Vec<PlatformHandle> = meta
+    let first_batch: Vec<PlatformHandle<RawFd>> = meta
         .drain_to_send()
         .into_iter()
         .map(assert_platform_handle_is_valid_file)

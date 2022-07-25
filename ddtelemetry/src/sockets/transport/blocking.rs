@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, AtomicUsize},
-        Arc,
+        Arc, RwLock,
     },
     time::SystemTime, os::unix::{prelude::{AsRawFd, FromRawFd}, net::UnixStream},
 };
@@ -134,6 +134,10 @@ Item: Serialize + TransferHandles {
         let msg = self.create_message(req)?;
         let mut buf = BytesMut::new();
         self.codec.encode(msg, &mut buf)?;
+
+        if buf.len() > 65000 {
+            //TODO if message is greater that 65k (PIPE_BUF on modern Linuxes) the messages will be interleaved
+        }
 
         self.channel.write_all(&buf)
     }

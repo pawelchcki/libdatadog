@@ -91,7 +91,7 @@ fn setup_tracing() {
 }
 
 fn main() -> anyhow::Result<()> {
-    setup_tracing();
+    // setup_tracing();
 
     // let _guard = runtime.enter();
     let pair = channel::Channel::pair().unwrap();
@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
         let th = thread::spawn(move || {
 
             for n in (10000*tn)..(10000*(tn+1)) {
-                ch.send_and_forget(WorldRequest::Hello { name: (0..10000).map(|_| "ping".to_owned()).collect() }).unwrap();
+                ch.send_and_forget(WorldRequest::Hello { name: (0..1000).map(|_| "ping".to_owned()).collect() }).unwrap();
                 // println!("sent: {}", n);
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     for th in joins {
-        th.join();
+        th.join().unwrap();
     }
     drop(ch);
     
