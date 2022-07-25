@@ -1,26 +1,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    io::{self, Write},
-    os::unix::{
-        net::UnixStream as StdUnixStream,
-        prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
-    },
-    sync::{
-        Arc, Mutex,
-    },
-    task::Poll,
+    io,
+    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
 };
-
-#[cfg(test)]
-mod tests;
-
-use sendfd::{RecvWithFd, SendWithFd};
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::UnixStream,
-};
 
 use crate::{
     fork::{getpid, ForkSafe},
@@ -30,30 +14,16 @@ use crate::{
 mod platform_handle;
 pub use platform_handle::*;
 
+mod channel;
+pub use channel::*;
+
+mod async_channel;
+pub use async_channel::*;
+
 /// sendfd crate's API is not able to resize the received FD container.
 /// limiting the max number of sent FDs should allow help lower a chance of surprise
 /// TODO: sendfd should be rewriten, fixed to handle cases like these better.
 pub const MAX_FDS: usize = 20;
-
-#[derive(Debug, Clone)]
-pub struct Channel {
-    inner: PlatformHandle<StdUnixStream>,
-}
-
-impl<T> ForkSafe for PlatformHandle<T> {}
-
-impl Write for Channel {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut h = self.inner.as_instance()?;
-        h.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut h = self.inner.as_instance()?;
-
-        h.flush()
-    }
-}
 
 #[derive(Deserialize, Serialize)]
 pub struct Message<Item> {
@@ -87,39 +57,6 @@ where
     }
 }
 
-impl From<Channel> for PlatformHandle<StdUnixStream> {
-    fn from(c: Channel) -> Self {
-        c.inner
-    }
-}
-
-#[derive(Debug)]
-pub struct ChannelPair(PlatformHandle<StdUnixStream>, PlatformHandle<StdUnixStream>);
-
-impl ChannelPair {
-    pub fn local(&self) -> Result<Channel, std::io::Error> {
-        unsafe {
-            self.1.try_steal().unwrap_or_default();
-            Ok(Channel::from(self.0.try_steal()?))
-        }
-    }
-    pub fn remote(&self) -> Result<Channel, std::io::Error> {
-        unsafe {
-            self.0.try_steal().unwrap_or_default();
-            Ok(Channel::from(self.1.try_steal()?))
-        }
-    }
-
-    pub fn pair(self) -> Result<(Channel, Channel), std::io::Error> {
-        unsafe {
-            Ok((
-                Channel::from(self.0.try_steal()?),
-                Channel::from(self.1.try_steal()?),
-            ))
-        }
-    }
-}
-
 impl<T> From<T> for PlatformHandle<T>
 where
     T: IntoRawFd,
@@ -130,34 +67,6 @@ where
 }
 
 impl ForkSafe for &ChannelPair {}
-
-impl Channel {
-    pub fn pair() -> io::Result<ChannelPair> {
-        let (local, remote) = StdUnixStream::pair()?;
-
-        unsafe {
-            Ok(ChannelPair(
-                PlatformHandle::from_raw_fd(local.into_raw_fd()),
-                PlatformHandle::from_raw_fd(remote.into_raw_fd()),
-            ))
-        }
-    }
-}
-
-impl From<PlatformHandle<StdUnixStream>> for Channel {
-    fn from(h: PlatformHandle<StdUnixStream>) -> Self {
-        Channel { inner: h }
-    }
-}
-
-#[derive(Debug)]
-#[pin_project]
-pub struct AsyncChannel {
-    #[pin]
-    inner: UnixStream,
-    pub metadata: Arc<Mutex<ChannelMetadata>>,
-    handles_to_close: Vec<PlatformHandle<RawFd>>,
-}
 
 #[derive(Debug, Clone)]
 pub struct ChannelMetadata {
@@ -288,102 +197,128 @@ impl ChannelMetadata {
     }
 }
 
-impl TryFrom<Channel> for AsyncChannel {
-    type Error = io::Error;
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use std::{
+        collections::BTreeMap,
+        fs::File,
+        io::{self, Read, Seek, Write},
+        os::unix::prelude::{AsRawFd, RawFd},
+        path::Path,
+    };
 
-    fn try_from(value: Channel) -> Result<Self, Self::Error> {
-        let fd = value.inner.into_instance()?;
+    use crate::sockets::transport::channel::MAX_FDS;
 
-        fd.set_nonblocking(true)?;
-        Ok(AsyncChannel {
-            inner: UnixStream::from_std(fd)?,
-            metadata: Arc::new(Mutex::new(ChannelMetadata::default())),
-            handles_to_close: vec![],
-        })
-    }
-}
+    use super::{ChannelMetadata, PlatformHandle};
 
-impl AsyncWrite for AsyncChannel {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
-        let project = self.project();
-        let handles: Vec<PlatformHandle<RawFd>> = project.metadata.lock().unwrap().drain_to_send();
-
-        if !handles.is_empty() {
-            let fds: Vec<RawFd> = handles.iter().map(AsRawFd::as_raw_fd).collect();
-            match project.inner.send_with_fd(buf, &fds) {
-                Ok(sent) => {
-                    project
-                        .metadata
-                        .lock()
-                        .unwrap()
-                        .defer_close_handles(handles);
-                    Poll::Ready(Ok(sent))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    project
-                        .metadata
-                        .lock()
-                        .unwrap()
-                        .reenqueue_for_sending(handles);
-                    project.inner.poll_write_ready(cx).map_ok(|_| 0)
-                }
-                Err(err) => Poll::Ready(Err(err)),
-            }
-        } else {
-            project.inner.poll_write(cx, buf)
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        self.project().inner.poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        self.project().inner.poll_shutdown(cx)
-    }
-}
-
-impl AsyncRead for AsyncChannel {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let project = self.project();
-        let mut fds = [0; MAX_FDS];
-
+    fn leaked_handle() -> PlatformHandle<RawFd> {
+        let file = tempfile::tempfile().unwrap();
+        let handle = PlatformHandle::from(file);
         unsafe {
-            let b = &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]);
-            match project.inner.recv_with_fd(b, &mut fds) {
-                Ok((bytes_received, descriptors_received)) => {
-                    let fds = fds[..descriptors_received].to_vec();
-                    project
-                        .metadata
-                        .lock()
-                        .unwrap()
-                        .fds_received
-                        .append(&mut fds.into());
-
-                    buf.assume_init(bytes_received);
-                    buf.advance(bytes_received);
-
-                    Poll::Ready(Ok(()))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    project.inner.poll_read_ready(cx)
-                }
-                Err(err) => Poll::Ready(Err(err)),
-            }
+            handle.try_steal().unwrap();
         }
+
+        handle.to_rawfd_type()
+    }
+
+    fn assert_platform_handle_is_valid_file(
+        handle: PlatformHandle<RawFd>,
+    ) -> PlatformHandle<RawFd> {
+        let handle = handle.try_claim().unwrap();
+        let mut file: File = unsafe { handle.to_any_type().into_instance().unwrap() };
+
+        write!(file, "test_string").unwrap();
+        file.rewind().unwrap();
+
+        let mut data = String::new();
+        file.read_to_string(&mut data).unwrap();
+        assert_eq!("test_string", data);
+
+        file.rewind().unwrap();
+        PlatformHandle::from(file).to_rawfd_type()
+    }
+
+    fn get_open_file_descriptors(
+        pid: Option<libc::pid_t>,
+    ) -> Result<BTreeMap<RawFd, String>, io::Error> {
+        let proc = pid.map(|p| format!("{}", p)).unwrap_or("self".into());
+
+        let fds_path = Path::new("/proc").join(proc).join("fd");
+        let fds = std::fs::read_dir(fds_path)?
+            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                let link = std::fs::read_link(r.path()).unwrap_or_default();
+                let link = link.into_os_string().into_string().ok().unwrap_or_default();
+                let fd = r.file_name().into_string().ok().unwrap_or_default();
+                fd.parse().ok().map(|fd| (fd, link))
+            })
+            .collect();
+
+        Ok(fds)
+    }
+
+    fn assert_file_descriptors_unchanged(
+        reference_meta: &BTreeMap<RawFd, String>,
+        pid: Option<libc::pid_t>,
+    ) {
+        let current_meta = get_open_file_descriptors(pid).unwrap();
+
+        // let missing_from_reference = current_fds.into()
+        assert_eq!(reference_meta, &current_meta);
+    }
+
+    #[test]
+    fn test_channel_metadata_only_provides_valid_owned() {
+        let reference = get_open_file_descriptors(None).unwrap();
+        let mut meta = ChannelMetadata::default();
+
+        // enqueue invalid platform handles those should be dropped before sending
+        for _h in 0..10 {
+            meta.enqueue_for_sending(leaked_handle())
+        }
+
+        // create real handles
+        let files: Vec<File> = (0..)
+            .map(|_| tempfile::tempfile().unwrap())
+            .take(MAX_FDS * 2)
+            .collect();
+        let reference_open_files = get_open_file_descriptors(None).unwrap();
+
+        // used for checking order of reenqueue behaviour
+        let file_fds: Vec<RawFd> = files.iter().map(AsRawFd::as_raw_fd).collect();
+
+        files
+            .into_iter()
+            .for_each(|f| meta.enqueue_for_sending(f.into()));
+
+        let first_batch: Vec<PlatformHandle<RawFd>> = meta
+            .drain_to_send()
+            .into_iter()
+            .map(assert_platform_handle_is_valid_file)
+            .collect();
+
+        assert_eq!(MAX_FDS, first_batch.len());
+
+        meta.reenqueue_for_sending(first_batch);
+
+        let mut handles = meta.drain_to_send();
+        let second_batch = meta.drain_to_send();
+
+        handles.extend(second_batch.into_iter());
+        assert_eq!(MAX_FDS * 2, handles.len());
+        assert_eq!(0, meta.drain_to_send().len());
+
+        let final_ordered_fds_list: Vec<RawFd> = handles.iter().map(AsRawFd::as_raw_fd).collect();
+        assert_eq!(file_fds, final_ordered_fds_list);
+
+        assert_file_descriptors_unchanged(&reference_open_files, None);
+
+        // test and dispose of all handles
+        for handle in handles {
+            assert_platform_handle_is_valid_file(handle);
+        }
+
+        assert_file_descriptors_unchanged(&reference, None);
     }
 }

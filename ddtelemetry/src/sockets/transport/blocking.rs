@@ -1,14 +1,11 @@
 use std::{
     io::{self, Write},
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64},
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
     time::SystemTime,
 };
 
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use serde::Serialize;
 use tarpc::{context, trace};
 use tokio_serde::{formats::SymmetricalMessagePack, Serializer};

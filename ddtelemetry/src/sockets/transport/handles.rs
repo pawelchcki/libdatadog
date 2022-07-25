@@ -1,10 +1,6 @@
-use std::{
-    error::Error,
-};
+use std::error::Error;
 
-
-
-use super::channel::{PlatformHandle};
+use super::channel::PlatformHandle;
 
 pub trait HandlesTransport {
     /// The error type when some error occurs during serialization.

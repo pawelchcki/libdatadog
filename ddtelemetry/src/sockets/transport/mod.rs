@@ -7,7 +7,7 @@ use std::{
 
 use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncWrite};
+use tokio::io::AsyncWrite;
 
 use tokio_serde::Framed as SerdeFramed;
 

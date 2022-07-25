@@ -2,7 +2,7 @@ use std::{
     io,
     sync::{atomic::AtomicU64, Arc},
     thread,
-    time::{Duration},
+    time::Duration,
 };
 
 use ddtelemetry::{
@@ -13,9 +13,7 @@ use ddtelemetry::{
         BlockingChannel, Transport,
     },
 };
-use tarpc::{
-    server::{Channel},
-};
+use tarpc::server::Channel;
 
 use tracing_subscriber::fmt::format::FmtSpan;
 
