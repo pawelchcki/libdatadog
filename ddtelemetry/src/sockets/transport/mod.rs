@@ -1,5 +1,4 @@
 use std::{
-    error::Error,
     io,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -8,10 +7,10 @@ use std::{
 
 use futures::{Sink, Stream};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_serde::Deserializer;
+use tokio::io::{AsyncWrite};
+
 use tokio_serde::Framed as SerdeFramed;
-use tokio_serde::Serializer;
+
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 

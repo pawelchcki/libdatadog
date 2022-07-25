@@ -1,9 +1,9 @@
-use pretty_assertions::{assert_eq, assert_ne};
+use pretty_assertions::{assert_eq};
 use std::{
     collections::BTreeMap,
     fs::File,
     io::{self, Read, Seek, Write},
-    os::unix::prelude::{AsRawFd, FromRawFd, RawFd},
+    os::unix::prelude::{AsRawFd, RawFd},
     path::Path,
 };
 
@@ -71,7 +71,7 @@ fn test_channel_metadata_only_provides_valid_owned() {
     let mut meta = ChannelMetadata::default();
 
     // enqueue invalid platform handles those should be dropped before sending
-    for h in (0..10) {
+    for _h in 0..10 {
         meta.enqueue_for_sending(leaked_handle())
     }
 

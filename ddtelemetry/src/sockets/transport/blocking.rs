@@ -1,18 +1,14 @@
 use std::{
-    io::{self, Read, Write},
-    os::unix::{
-        net::UnixStream,
-        prelude::{AsRawFd, FromRawFd},
-    },
+    io::{self, Write},
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, AtomicUsize},
-        Arc, RwLock,
+        atomic::{AtomicU64},
+        Arc,
     },
     time::SystemTime,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BytesMut};
 use serde::Serialize;
 use tarpc::{context, trace};
 use tokio_serde::{formats::SymmetricalMessagePack, Serializer};
@@ -34,7 +30,7 @@ impl<Item> Clone for BlockingChannel<Item> {
     fn clone(&self) -> Self {
         Self {
             channel: self.channel.clone(),
-            pid: self.pid.clone(),
+            pid: self.pid,
             requests_id: self.requests_id.clone(),
             codec: self.codec.clone(),
         }
@@ -46,7 +42,7 @@ impl<Item> From<Channel> for BlockingChannel<Item> {
         let pid = unsafe { libc::getpid() };
         BlockingChannel {
             channel: c,
-            pid: pid,
+            pid,
             requests_id: Arc::from(AtomicU64::new(0)),
             codec: FramedBlocking::default(),
         }
@@ -115,14 +111,14 @@ where
 {
     fn move_handles<Transport: super::handles::HandlesTransport>(
         &self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
 
     fn receive_handles<Transport: super::handles::HandlesTransport>(
         &mut self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
@@ -139,7 +135,7 @@ where
             .requests_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let req = ClientMessage::Request(Request {
-            context: context,
+            context,
             id: request_id,
             message: req,
         });

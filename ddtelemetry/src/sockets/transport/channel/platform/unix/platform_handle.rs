@@ -38,7 +38,7 @@ pub struct PlatformHandle<T> {
 impl<T> Clone for PlatformHandle<T> {
     fn clone(&self) -> Self {
         Self {
-            fd: self.fd.clone(),
+            fd: self.fd,
             inner: self.inner.clone(),
             phantom: PhantomData,
         }
@@ -95,7 +95,7 @@ impl<T> PlatformHandle<T> {
 
         Ok(HandleGuard {
             _inner: inner,
-            instance: instance,
+            instance,
         })
     }
 

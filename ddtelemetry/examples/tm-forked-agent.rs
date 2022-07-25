@@ -2,7 +2,7 @@ use std::{
     io,
     sync::{atomic::AtomicU64, Arc},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration},
 };
 
 use ddtelemetry::{
@@ -14,10 +14,9 @@ use ddtelemetry::{
     },
 };
 use tarpc::{
-    context,
-    server::{self, Channel},
+    server::{Channel},
 };
-use tokio_serde::formats::Bincode;
+
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tarpc::service]
@@ -35,14 +34,14 @@ use futures::future::{self, Ready};
 impl TransferHandles for WorldResponse {
     fn move_handles<Transport: HandlesTransport>(
         &self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
 
     fn receive_handles<Transport: HandlesTransport>(
         &mut self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
@@ -51,14 +50,14 @@ impl TransferHandles for WorldResponse {
 impl TransferHandles for WorldRequest {
     fn move_handles<Transport: HandlesTransport>(
         &self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
 
     fn receive_handles<Transport: HandlesTransport>(
         &mut self,
-        transport: Transport,
+        _transport: Transport,
     ) -> Result<(), Transport::Error> {
         Ok(())
     }
@@ -70,7 +69,7 @@ impl World for HelloServer {
 
     type HelloFut = Ready<()>;
 
-    fn hello(self, ctx: tarpc::context::Context, name: String) -> Self::HelloFut {
+    fn hello(self, _ctx: tarpc::context::Context, name: String) -> Self::HelloFut {
         let cnt = self.cnt.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         println!("req: {} - len: {}", cnt, name.len());
         future::ready(())
@@ -120,7 +119,7 @@ fn main() -> anyhow::Result<()> {
     for tn in 0..10 {
         let mut ch = ch.clone();
         let th = thread::spawn(move || {
-            for n in (10000 * tn)..(10000 * (tn + 1)) {
+            for _n in (10000 * tn)..(10000 * (tn + 1)) {
                 ch.send_and_forget(WorldRequest::Hello {
                     name: (0..1000).map(|_| "ping".to_owned()).collect(),
                 })

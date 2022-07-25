@@ -1,14 +1,11 @@
 use std::{
-    borrow::Borrow,
     collections::{BTreeMap, VecDeque},
-    fs::File,
     io::{self, Write},
     os::unix::{
         net::UnixStream as StdUnixStream,
         prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     },
     sync::{
-        atomic::{AtomicI32, Ordering},
         Arc, Mutex,
     },
     task::Poll,
@@ -259,7 +256,7 @@ impl ChannelMetadata {
     }
 
     pub(crate) fn reenqueue_for_sending(&mut self, mut handles: Vec<PlatformHandle<RawFd>>) {
-        handles.extend(self.fds_to_send.drain(..));
+        handles.append(&mut self.fds_to_send);
         self.fds_to_send = handles;
     }
 
@@ -287,10 +284,7 @@ impl ChannelMetadata {
 
         let fd = self.fds_received.pop_front();
 
-        match fd {
-            Some(fd) => Some(unsafe { PlatformHandle::from_raw_fd(fd) }),
-            None => None,
-        }
+        fd.map(|fd| unsafe { PlatformHandle::from_raw_fd(fd) })
     }
 }
 
@@ -318,7 +312,7 @@ impl AsyncWrite for AsyncChannel {
         let project = self.project();
         let handles: Vec<PlatformHandle<RawFd>> = project.metadata.lock().unwrap().drain_to_send();
 
-        if handles.len() > 0 {
+        if !handles.is_empty() {
             let fds: Vec<RawFd> = handles.iter().map(AsRawFd::as_raw_fd).collect();
             match project.inner.send_with_fd(buf, &fds) {
                 Ok(sent) => {

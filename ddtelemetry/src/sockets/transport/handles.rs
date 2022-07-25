@@ -1,15 +1,10 @@
 use std::{
     error::Error,
-    fs::File,
-    marker::PhantomData,
-    mem::MaybeUninit,
-    ops::DerefMut,
-    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd},
 };
 
-use serde::{Deserialize, Serialize};
 
-use super::channel::{FromNativeRawHandle, PlatformHandle};
+
+use super::channel::{PlatformHandle};
 
 pub trait HandlesTransport {
     /// The error type when some error occurs during serialization.
