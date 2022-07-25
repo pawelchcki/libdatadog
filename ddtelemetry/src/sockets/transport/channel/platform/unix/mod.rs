@@ -68,7 +68,7 @@ where
 
 impl ForkSafe for &ChannelPair {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChannelMetadata {
     fds_to_send: Vec<PlatformHandle<RawFd>>,
     fds_received: VecDeque<RawFd>,

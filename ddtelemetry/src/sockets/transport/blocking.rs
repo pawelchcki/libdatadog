@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    io::{self},
     pin::Pin,
     sync::{atomic::AtomicU64, Arc},
     time::SystemTime,
@@ -13,17 +13,17 @@ use tokio_util::codec::{Encoder, LengthDelimitedCodec};
 
 use super::{
     channel::{Channel, Message},
-    handles::TransferHandles,
+    handles::{HandlesTransport, TransferHandles},
 };
 
-pub struct BlockingChannel<Item> {
+pub struct BlockingTransport<Item> {
     channel: Channel,
     pid: libc::pid_t,
     requests_id: Arc<AtomicU64>,
     codec: FramedBlocking<Message<ClientMessage<Item>>>,
 }
 
-impl<Item> Clone for BlockingChannel<Item> {
+impl<Item> Clone for BlockingTransport<Item> {
     fn clone(&self) -> Self {
         Self {
             channel: self.channel.clone(),
@@ -34,10 +34,10 @@ impl<Item> Clone for BlockingChannel<Item> {
     }
 }
 
-impl<Item> From<Channel> for BlockingChannel<Item> {
+impl<Item> From<Channel> for BlockingTransport<Item> {
     fn from(c: Channel) -> Self {
         let pid = unsafe { libc::getpid() };
-        BlockingChannel {
+        BlockingTransport {
             channel: c,
             pid,
             requests_id: Arc::from(AtomicU64::new(0)),
@@ -106,74 +106,84 @@ impl<T> TransferHandles for ClientMessage<T>
 where
     T: TransferHandles,
 {
-    fn move_handles<Transport: super::handles::HandlesTransport>(
+    fn move_handles<Transport: HandlesTransport>(
         &self,
-        _transport: Transport,
+        transport: Transport,
     ) -> Result<(), Transport::Error> {
-        Ok(())
+        match self {
+            ClientMessage::Request(r) => r.move_handles(transport),
+            ClientMessage::Cancel {
+                trace_context: _,
+                request_id: _,
+            } => Ok(()),
+        }
     }
 
-    fn receive_handles<Transport: super::handles::HandlesTransport>(
+    fn receive_handles<Transport: HandlesTransport>(
         &mut self,
-        _transport: Transport,
+        transport: Transport,
     ) -> Result<(), Transport::Error> {
-        Ok(())
+        match self {
+            ClientMessage::Request(r) => r.receive_handles(transport),
+            ClientMessage::Cancel { trace_context: _, request_id: _ } => todo!(),
+        }
     }
 }
 
-impl<Item> BlockingChannel<Item>
+impl<T> TransferHandles for Request<T>
+where
+    T: TransferHandles,
+{
+    fn move_handles<Transport: HandlesTransport>(
+        &self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        self.message.move_handles(transport)
+    }
+
+    fn receive_handles<Transport: HandlesTransport>(
+        &mut self,
+        transport: Transport,
+    ) -> Result<(), Transport::Error> {
+        self.message.receive_handles(transport)
+    }
+}
+
+impl<Item> BlockingTransport<Item>
 where
     Item: Serialize + TransferHandles,
 {
-    pub fn send_and_forget(&mut self, req: Item) -> Result<(), io::Error> {
+    fn new_client_message(&self, item: Item, deadline: Option<SystemTime>) -> ClientMessage<Item> {
         let mut context = context::current();
-        context.deadline = SystemTime::UNIX_EPOCH;
+
+        if let Some(deadline) = deadline {
+            context.deadline = deadline;
+        }
+
         let request_id = self
             .requests_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let req = ClientMessage::Request(Request {
+
+        ClientMessage::Request(Request {
             context,
             id: request_id,
-            message: req,
-        });
+            message: item,
+        })
+    }
 
-        let msg = self.create_message(req)?;
+    pub fn send_ignore_response(&mut self, item: Item) -> Result<(), io::Error> {
+        let req = self.new_client_message(item, Some(SystemTime::UNIX_EPOCH));
+
+        let msg = self.channel.metadata.create_message(req)?;
+
         let mut buf = BytesMut::new();
         self.codec.encode(msg, &mut buf)?;
 
         if buf.len() > 65000 {
             //TODO if message is greater that 65k (PIPE_BUF on modern Linuxes) the messages will be interleaved
+            // with other users of the channel
         }
 
-        self.channel.write_all(&buf)
-    }
-
-    pub fn read_to_dev_null(&mut self) -> Result<(), io::Error> {
-        // let fd = self.channel.as_raw_fd();
-
-        // UnixStream::from_raw_fd(fd)
-        // self.channel.read
-
-        Ok(())
-    }
-
-    pub fn unwrap_message<T>(&mut self, message: Message<T>) -> Result<T, io::Error>
-    where
-        T: TransferHandles,
-    {
-        Ok(message.item)
-    }
-
-    pub fn create_message<T>(&mut self, item: T) -> Result<Message<T>, io::Error>
-    where
-        T: TransferHandles,
-    {
-        let message = Message {
-            item,
-            acked_handles: vec![],
-            pid: self.pid,
-        };
-
-        Ok(message)
+        self.channel.send_message(&buf)
     }
 }

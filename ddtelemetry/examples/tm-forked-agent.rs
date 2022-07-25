@@ -10,7 +10,7 @@ use ddtelemetry::{
     sockets::transport::{
         channel::{self},
         handles::{HandlesTransport, TransferHandles},
-        BlockingChannel, Transport,
+        BlockingTransport, Transport,
     },
 };
 use tarpc::server::Channel;
@@ -104,14 +104,14 @@ fn main() -> anyhow::Result<()> {
     .unwrap();
 
     let ch = pair.local().unwrap();
-    let ch = BlockingChannel::from(ch);
+    let ch = BlockingTransport::from(ch);
 
     let mut joins = vec![];
     for tn in 0..10 {
         let mut ch = ch.clone();
         let th = thread::spawn(move || {
             for _n in (10000 * tn)..(10000 * (tn + 1)) {
-                ch.send_and_forget(WorldRequest::Hello {
+                ch.send_ignore_response(WorldRequest::Hello {
                     name: (0..1000).map(|_| "ping".to_owned()).collect(),
                 })
                 .unwrap();

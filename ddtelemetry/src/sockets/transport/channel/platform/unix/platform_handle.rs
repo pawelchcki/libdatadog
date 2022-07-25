@@ -11,21 +11,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub type NativeRawHandle = RawFd;
-
-pub trait FromNativeRawHandle: FromRawFd {
-    unsafe fn from_raw_native_handle(handle: NativeRawHandle) -> Self;
-}
-
-impl<T> FromNativeRawHandle for T
-where
-    T: FromRawFd + Sized,
-{
-    unsafe fn from_raw_native_handle(handle: NativeRawHandle) -> Self {
-        FromRawFd::from_raw_fd(handle)
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PlatformHandle<T> {
     fd: RawFd, // Just an fd number to be used as reference, not for accessing actual fd
