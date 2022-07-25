@@ -25,7 +25,6 @@ pub mod metrics;
 pub mod sockets;
 pub mod worker;
 
-
 #[macro_use]
 extern crate pin_project;
 
@@ -132,4 +131,3 @@ pub async fn push_telemetry(telemetry: &Telemetry<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 }
-

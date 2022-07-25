@@ -1,11 +1,15 @@
 use std::{
     io::{self, Read, Write},
+    os::unix::{
+        net::UnixStream,
+        prelude::{AsRawFd, FromRawFd},
+    },
     pin::Pin,
     sync::{
         atomic::{AtomicU64, AtomicUsize},
         Arc, RwLock,
     },
-    time::SystemTime, os::unix::{prelude::{AsRawFd, FromRawFd}, net::UnixStream},
+    time::SystemTime,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -28,7 +32,12 @@ pub struct BlockingChannel<Item> {
 
 impl<Item> Clone for BlockingChannel<Item> {
     fn clone(&self) -> Self {
-        Self { channel: self.channel.clone(), pid: self.pid.clone(), requests_id: self.requests_id.clone(), codec: self.codec.clone() }
+        Self {
+            channel: self.channel.clone(),
+            pid: self.pid.clone(),
+            requests_id: self.requests_id.clone(),
+            codec: self.codec.clone(),
+        }
     }
 }
 
@@ -39,7 +48,7 @@ impl<Item> From<Channel> for BlockingChannel<Item> {
             channel: c,
             pid: pid,
             requests_id: Arc::from(AtomicU64::new(0)),
-            codec: FramedBlocking::default()
+            codec: FramedBlocking::default(),
         }
     }
 }
@@ -51,7 +60,10 @@ pub struct FramedBlocking<Item> {
 
 impl<Item> Clone for FramedBlocking<Item> {
     fn clone(&self) -> Self {
-        Self { len: self.len.clone(), codec: Box::pin(Default::default()) }
+        Self {
+            len: self.len.clone(),
+            codec: Box::pin(Default::default()),
+        }
     }
 }
 
@@ -116,10 +128,11 @@ where
     }
 }
 
-impl<Item> BlockingChannel<Item>   where
-Item: Serialize + TransferHandles {
-    pub fn send_and_forget(&mut self, req: Item) -> Result<(), io::Error>
-    {
+impl<Item> BlockingChannel<Item>
+where
+    Item: Serialize + TransferHandles,
+{
+    pub fn send_and_forget(&mut self, req: Item) -> Result<(), io::Error> {
         let mut context = context::current();
         context.deadline = SystemTime::UNIX_EPOCH;
         let request_id = self
@@ -142,8 +155,7 @@ Item: Serialize + TransferHandles {
         self.channel.write_all(&buf)
     }
 
-    pub fn read_to_dev_null(&mut self) -> Result<(), io::Error>
-    {
+    pub fn read_to_dev_null(&mut self) -> Result<(), io::Error> {
         // let fd = self.channel.as_raw_fd();
 
         // UnixStream::from_raw_fd(fd)

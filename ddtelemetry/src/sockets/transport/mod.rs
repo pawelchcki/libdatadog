@@ -2,7 +2,8 @@ use std::{
     error::Error,
     io,
     pin::Pin,
-    task::{Context, Poll}, sync::{Arc, Mutex},
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
 };
 
 use futures::{Sink, Stream};
@@ -17,12 +18,9 @@ use tokio_util::codec::LengthDelimitedCodec;
 mod blocking;
 pub use blocking::*;
 
-
 use self::{
-    channel::{
-        AsyncChannel, Channel, ChannelMetadata, DefaultCodec, Message,
-    },
-    handles::{TransferHandles},
+    channel::{AsyncChannel, Channel, ChannelMetadata, DefaultCodec, Message},
+    handles::TransferHandles,
 };
 
 pub mod channel;
@@ -61,17 +59,18 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<io::Result<Item>>> {
         let this = self.project();
-        this
-            .inner
+        this.inner
             .poll_next(cx)
-            .map(|res| {
-                match res {
-                    Some(Ok(message)) => {
-                        Some(this.channel_metadata.lock().unwrap().unwrap_message(message).map_err(Into::into))
-                    },
-                    Some(Err(e)) => Some(Err(e.into())),
-                    None => None,
-                }
+            .map(|res| match res {
+                Some(Ok(message)) => Some(
+                    this.channel_metadata
+                        .lock()
+                        .unwrap()
+                        .unwrap_message(message)
+                        .map_err(Into::into),
+                ),
+                Some(Err(e)) => Some(Err(e.into())),
+                None => None,
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
@@ -96,8 +95,7 @@ where
         let this = self.project();
         let message = this.channel_metadata.lock().unwrap().create_message(item)?;
 
-        this
-            .inner
+        this.inner
             .start_send(message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }

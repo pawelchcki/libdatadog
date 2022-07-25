@@ -1,7 +1,15 @@
-use std::{sync::{atomic::{AtomicI32, Ordering}, Arc}, os::unix::prelude::{RawFd, FromRawFd, AsRawFd, IntoRawFd}, io, marker::PhantomData, mem::MaybeUninit};
+use std::{
+    io,
+    marker::PhantomData,
+    mem::MaybeUninit,
+    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc,
+    },
+};
 
-use serde::{Serialize, Deserialize};
-
+use serde::{Deserialize, Serialize};
 
 pub type NativeRawHandle = RawFd;
 
@@ -24,72 +32,102 @@ pub struct PlatformHandle<T> {
     #[serde(skip)]
     inner: Arc<PlatformHandleInner>,
 
-    phantom: PhantomData<T>
+    phantom: PhantomData<T>,
 }
 
 impl<T> Clone for PlatformHandle<T> {
     fn clone(&self) -> Self {
-        Self { fd: self.fd.clone(), inner: self.inner.clone(), phantom: PhantomData }
+        Self {
+            fd: self.fd.clone(),
+            inner: self.inner.clone(),
+            phantom: PhantomData,
+        }
     }
 }
 
 impl<T> PlatformHandle<T> {
     pub fn try_leak(self) -> Result<RawFd, io::Error> {
-        let inner = self.inner.try_unwrap_valid()?;
+        let inner = self.try_unwrap_inner()?;
 
         Ok(unsafe { inner.leak() })
     }
 
-    pub fn try_unwrap_into(self) -> Result<T, io::Error>
+    pub fn into_instance(self) -> Result<T, io::Error>
     where
         T: FromRawFd,
     {
         unsafe {
-            let fd: RawFd = self.inner.try_unwrap_valid()?.leak();
+            let fd: RawFd = self.try_unwrap_inner()?.leak();
             Ok(FromRawFd::from_raw_fd(fd))
         }
     }
 
-    pub fn try_clone_valid(&self) -> Result<Self, io::Error> {
+    pub fn try_clone(&self) -> Result<Self, io::Error> {
         Ok(Self {
-            inner: self.inner.try_clone_valid()?,
+            inner: self.inner.try_clone()?,
             fd: self.fd,
-            phantom: PhantomData
+            phantom: PhantomData,
         })
     }
 
-    pub unsafe fn try_borrow_into(&self) -> Result<T, io::Error>
-    where
-        T: FromRawFd,
-    {
-        let fd: RawFd = self.inner.try_access_valid()?.as_raw_fd();
-        Ok(FromRawFd::from_raw_fd(fd))
+    fn try_unwrap_inner(self) -> Result<PlatformHandleInner, io::Error> {
+        let handle = Arc::try_unwrap(self.inner).map_err(|inner| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "attempting to unwrap FD from shared platform handle (fd: {} ({}))",
+                    inner.as_raw_fd(),
+                    self.fd
+                ),
+            )
+        })?;
+        handle.ensure_valid()?;
+        Ok(handle)
     }
 
-    pub unsafe fn as_borrowed(&self) -> Result<BorrowedHandle<T>, io::Error>  where
-    T: FromRawFd + IntoRawFd, {
-        let fd: RawFd = self.inner.try_access_valid()?.as_raw_fd();
-        let instance = MaybeUninit::new(FromRawFd::from_raw_fd(fd));
+    pub fn as_instance(&self) -> Result<HandleGuard<T>, io::Error>
+    where
+        T: FromRawFd + IntoRawFd,
+    {
+        let inner = self.inner.try_clone()?;
+        let fd: RawFd = inner.as_raw_fd();
+        let instance = MaybeUninit::new(unsafe { FromRawFd::from_raw_fd(fd) });
 
-        Ok(BorrowedHandle {
-            platform_handle: self.try_clone_valid()?,
-            inner: instance,
+        Ok(HandleGuard {
+            _inner: inner,
+            instance: instance,
         })
     }
 
     /// Returns new instance, checking if inner handle is only referenced once and is valid returns error if not
     pub fn try_claim(self) -> Result<Self, io::Error> {
-        let inner = Arc::new(self.inner.try_unwrap_valid()?);
-        Ok(Self { inner, fd: self.fd, phantom: PhantomData })
+        let fd = self.fd;
+        let inner = Arc::new(self.try_unwrap_inner()?);
+        Ok(Self {
+            inner,
+            fd,
+            phantom: PhantomData,
+        })
     }
 
+    /// try_steall will pull File descriptor from shared data, potentially causing other users to perform
+    /// panicing operations
+    /// # Use with care
     pub unsafe fn try_steal(&self) -> Result<Self, io::Error> {
         let inner = Arc::new(self.inner.try_steal()?);
-        Ok(Self {inner, fd: self.fd, phantom: PhantomData})
+        Ok(Self {
+            inner,
+            fd: self.fd,
+            phantom: PhantomData,
+        })
     }
 
     pub unsafe fn to_any_type<Y>(self) -> PlatformHandle<Y> {
-        PlatformHandle { fd: self.fd, inner: self.inner, phantom: PhantomData }
+        PlatformHandle {
+            fd: self.fd,
+            inner: self.inner,
+            phantom: PhantomData,
+        }
     }
 
     pub fn to_rawfd_type(self) -> PlatformHandle<RawFd> {
@@ -105,7 +143,11 @@ impl<T> FromRawFd for PlatformHandle<T> {
     ///
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         let inner = Arc::new(PlatformHandleInner::from_raw_fd(fd));
-        Self { fd, inner, phantom: PhantomData }
+        Self {
+            fd,
+            inner,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -136,53 +178,29 @@ impl PlatformHandleInner {
     /// Old instance effectively no longer will be able to use the FD
     ///
     /// Returns error if FD instance was unowned or invalid
-    pub unsafe fn try_claim(&self) -> Result<Self, io::Error> {
-        let claim = Self::from_raw_fd(self.leak());
-        claim.try_access_valid()?;
-        Ok(claim)
-    }
-
-    /// Transfers ownership of the FD into a new instance
-    /// Old instance effectively no longer will be able to use the FD
-    ///
-    /// Returns error if FD instance was unowned or invalid
     pub unsafe fn try_steal(&self) -> Result<Self, io::Error> {
         let claim = Self::from_raw_fd(self.leak());
-        claim.try_access_valid()?;
+        claim.ensure_valid()?;
         Ok(claim)
     }
 
-    fn try_clone_valid(self: &Arc<Self>) -> Result<Arc<Self>, io::Error> {
-        let handle = Arc::clone(self);
-        handle.try_access_valid()?;
-        Ok(handle)
+    fn try_clone(self: &Arc<Self>) -> Result<Arc<Self>, io::Error> {
+        let clone = Arc::clone(self);
+        self.ensure_valid()?;
+        Ok(clone)
     }
 
-    pub fn try_unwrap_valid(self: Arc<Self>) -> Result<Self, io::Error> {
-        let handle = Arc::try_unwrap(self).map_err(|inner| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "attempting to unwrap FD from shared platform handle (fd: {})",
-                    inner.as_raw_fd()
-                ),
-            )
-        })?;
-        handle.try_access_valid()?;
-        Ok(handle)
-    }
-
-    pub fn try_access_valid(&self) -> Result<&Self, io::Error> {
+    fn ensure_valid(&self) -> Result<(), io::Error> {
         if !self.is_valid() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
-                    "attempting to accesss FD from unowned platform handle (fd: {})",
+                    "attempting to fetch FD from unowned platform handle (fd: {})",
                     self.as_raw_fd()
                 ),
             ));
         }
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -213,7 +231,11 @@ impl<T> Default for PlatformHandle<T> {
     fn default() -> Self {
         let inner = Arc::from(PlatformHandleInner::default());
         let fd = inner.as_raw_fd();
-        Self { fd, inner, phantom: PhantomData }
+        Self {
+            fd,
+            inner,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -228,42 +250,42 @@ impl Drop for PlatformHandleInner {
         }
     }
 }
-pub struct BorrowedHandle<T>
+pub struct HandleGuard<T>
 where
     T: IntoRawFd,
 {
-    platform_handle: PlatformHandle<T>,
-    inner: MaybeUninit<T>,
+    _inner: Arc<PlatformHandleInner>,
+    instance: MaybeUninit<T>,
 }
 
-impl<T> core::ops::Deref for BorrowedHandle<T>
+impl<T> core::ops::Deref for HandleGuard<T>
 where
     T: IntoRawFd,
 {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.inner.assume_init_ref() }
+        unsafe { self.instance.assume_init_ref() }
     }
 }
 
-impl<T> std::ops::DerefMut for BorrowedHandle<T>
+impl<T> std::ops::DerefMut for HandleGuard<T>
 where
     T: IntoRawFd,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.assume_init_mut() }
+        unsafe { self.instance.assume_init_mut() }
     }
 }
 
-impl<T> Drop for BorrowedHandle<T>
+impl<T> Drop for HandleGuard<T>
 where
     T: IntoRawFd,
 {
     fn drop(&mut self) {
         let uninit = MaybeUninit::uninit();
-        let inner = std::mem::replace(&mut self.inner, uninit);
-        let inner = unsafe { inner.assume_init() };
-        inner.into_raw_fd(); // leak handle knowing it was just a reference
+        let instance = std::mem::replace(&mut self.instance, uninit);
+        let instance = unsafe { instance.assume_init() };
+        instance.into_raw_fd(); // leak handle knowing it was just a reference
     }
 }

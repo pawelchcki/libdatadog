@@ -27,9 +27,7 @@ use tokio::{
 
 use crate::{
     fork::{getpid, ForkSafe},
-    sockets::transport::handles::{
-         HandlesTransport, TransferHandles,
-    },
+    sockets::transport::handles::{HandlesTransport, TransferHandles},
 };
 
 mod platform_handle;
@@ -49,12 +47,12 @@ impl<T> ForkSafe for PlatformHandle<T> {}
 
 impl Write for Channel {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut h = unsafe { self.inner.as_borrowed()? };
+        let mut h = self.inner.as_instance()?;
         h.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut h = unsafe { self.inner.as_borrowed()? };
+        let mut h = self.inner.as_instance()?;
 
         h.flush()
     }
@@ -104,26 +102,31 @@ pub struct ChannelPair(PlatformHandle<StdUnixStream>, PlatformHandle<StdUnixStre
 impl ChannelPair {
     pub fn local(&self) -> Result<Channel, std::io::Error> {
         unsafe {
-            self.1.try_steal().unwrap_or_default(); 
+            self.1.try_steal().unwrap_or_default();
             Ok(Channel::from(self.0.try_steal()?))
         }
     }
     pub fn remote(&self) -> Result<Channel, std::io::Error> {
         unsafe {
-            self.0.try_steal().unwrap_or_default(); 
+            self.0.try_steal().unwrap_or_default();
             Ok(Channel::from(self.1.try_steal()?))
         }
     }
 
     pub fn pair(self) -> Result<(Channel, Channel), std::io::Error> {
         unsafe {
-            Ok((Channel::from(self.0.try_steal()?),
-            Channel::from(self.1.try_steal()?)))
+            Ok((
+                Channel::from(self.0.try_steal()?),
+                Channel::from(self.1.try_steal()?),
+            ))
         }
     }
 }
 
-impl<T> From<T> for PlatformHandle<T> where T: IntoRawFd {
+impl<T> From<T> for PlatformHandle<T>
+where
+    T: IntoRawFd,
+{
     fn from(h: T) -> Self {
         unsafe { PlatformHandle::from_raw_fd(h.into_raw_fd()) }
     }
@@ -149,8 +152,6 @@ impl From<PlatformHandle<StdUnixStream>> for Channel {
         Channel { inner: h }
     }
 }
-
-
 
 #[derive(Debug)]
 #[pin_project]
@@ -195,7 +196,10 @@ impl HandlesTransport for &mut ChannelMetadata {
         self.find_handle(hint).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("can't provide expected handle for hint: {}", hint.as_raw_fd()),
+                format!(
+                    "can't provide expected handle for hint: {}",
+                    hint.as_raw_fd()
+                ),
             )
         })
     }
@@ -218,7 +222,7 @@ impl ChannelMetadata {
             // process. Thus we should leak the handles allowing other PlatformHandle's to safely close
             if message.pid == self.pid {
                 for h in fds_to_close.into_iter() {
-                    h.try_leak()?;
+                    h.try_leak().unwrap_or_default();
                 }
             }
         }
@@ -244,7 +248,9 @@ impl ChannelMetadata {
     }
 
     pub(crate) fn defer_close_handles<T>(&mut self, handles: Vec<PlatformHandle<T>>) {
-        let handles = handles.into_iter().map(|h| (h.as_raw_fd(), h.to_rawfd_type() ));
+        let handles = handles
+            .into_iter()
+            .map(|h| (h.as_raw_fd(), h.to_rawfd_type()));
         self.fds_to_close.extend(handles);
     }
 
@@ -292,7 +298,7 @@ impl TryFrom<Channel> for AsyncChannel {
     type Error = io::Error;
 
     fn try_from(value: Channel) -> Result<Self, Self::Error> {
-        let fd = value.inner.try_unwrap_into()?;
+        let fd = value.inner.into_instance()?;
 
         fd.set_nonblocking(true)?;
         Ok(AsyncChannel {

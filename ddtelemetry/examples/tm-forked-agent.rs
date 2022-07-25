@@ -1,6 +1,8 @@
 use std::{
     io,
-    time::{Duration, SystemTime}, sync::{atomic::AtomicU64, Arc}, thread,
+    sync::{atomic::AtomicU64, Arc},
+    thread,
+    time::{Duration, SystemTime},
 };
 
 use ddtelemetry::{
@@ -26,7 +28,7 @@ trait World {
 
 #[derive(Clone)]
 struct HelloServer {
-    cnt: Arc<AtomicU64>
+    cnt: Arc<AtomicU64>,
 }
 use futures::future::{self, Ready};
 
@@ -77,7 +79,9 @@ impl World for HelloServer {
 
 impl Default for HelloServer {
     fn default() -> Self {
-        Self { cnt: Default::default() }
+        Self {
+            cnt: Default::default(),
+        }
     }
 }
 
@@ -95,8 +99,7 @@ fn main() -> anyhow::Result<()> {
 
     // let _guard = runtime.enter();
     let pair = channel::Channel::pair().unwrap();
-    let _child = safer_fork(&pair, |pair| 
-    {
+    let _child = safer_fork(&pair, |pair| {
         let remote = pair.remote().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -110,7 +113,6 @@ fn main() -> anyhow::Result<()> {
     })
     .unwrap();
 
-
     let ch = pair.local().unwrap();
     let ch = BlockingChannel::from(ch);
 
@@ -118,9 +120,11 @@ fn main() -> anyhow::Result<()> {
     for tn in 0..10 {
         let mut ch = ch.clone();
         let th = thread::spawn(move || {
-
-            for n in (10000*tn)..(10000*(tn+1)) {
-                ch.send_and_forget(WorldRequest::Hello { name: (0..1000).map(|_| "ping".to_owned()).collect() }).unwrap();
+            for n in (10000 * tn)..(10000 * (tn + 1)) {
+                ch.send_and_forget(WorldRequest::Hello {
+                    name: (0..1000).map(|_| "ping".to_owned()).collect(),
+                })
+                .unwrap();
                 // println!("sent: {}", n);
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -134,9 +138,8 @@ fn main() -> anyhow::Result<()> {
         th.join().unwrap();
     }
     drop(ch);
-    
-   
-    println!("dropping {}, self: {}", _child, unsafe {libc::getpid()});
+
+    println!("dropping {}, self: {}", _child, unsafe { libc::getpid() });
     std::thread::sleep(Duration::from_secs(120));
 
     Ok(())

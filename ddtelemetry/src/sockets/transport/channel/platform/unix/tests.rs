@@ -1,3 +1,4 @@
+use pretty_assertions::{assert_eq, assert_ne};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -5,7 +6,6 @@ use std::{
     os::unix::prelude::{AsRawFd, FromRawFd, RawFd},
     path::Path,
 };
-use pretty_assertions::{assert_eq, assert_ne};
 
 use crate::sockets::transport::channel::MAX_FDS;
 
@@ -23,7 +23,7 @@ fn leaked_handle() -> PlatformHandle<RawFd> {
 
 fn assert_platform_handle_is_valid_file(handle: PlatformHandle<RawFd>) -> PlatformHandle<RawFd> {
     let handle = handle.try_claim().unwrap();
-    let mut file: File = unsafe { handle.to_any_type().try_unwrap_into().unwrap() };
+    let mut file: File = unsafe { handle.to_any_type().into_instance().unwrap() };
 
     write!(file, "test_string").unwrap();
     file.rewind().unwrap();
@@ -118,5 +118,3 @@ fn test_channel_metadata_only_provides_valid_owned() {
 
     assert_file_descriptors_unchanged(&reference, None);
 }
-
-
