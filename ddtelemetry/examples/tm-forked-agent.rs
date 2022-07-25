@@ -23,7 +23,7 @@ trait World {
     async fn hello(name: String) -> ();
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct HelloServer {
     cnt: Arc<AtomicU64>,
 }
@@ -74,14 +74,7 @@ impl World for HelloServer {
     }
 }
 
-impl Default for HelloServer {
-    fn default() -> Self {
-        Self {
-            cnt: Default::default(),
-        }
-    }
-}
-
+#[allow(dead_code)]
 fn setup_tracing() {
     let collector = tracing_subscriber::fmt()
         .with_writer(io::stderr)

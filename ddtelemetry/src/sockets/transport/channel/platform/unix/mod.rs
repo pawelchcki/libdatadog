@@ -33,7 +33,7 @@ pub struct Message<Item> {
 }
 
 impl<Item> Message<Item> {
-    pub fn ref_item<'a>(&'a self) -> &'a Item {
+    pub fn ref_item(& self) -> &Item {
         &self.item
     }
 }
@@ -117,19 +117,20 @@ impl ChannelMetadata {
         T: TransferHandles,
     {
         {
-            // close all open file desriptors that were ACKed by the other party
-            let fds_to_close: Vec<PlatformHandle<RawFd>> = message
+            let fds_to_close = message
                 .acked_handles
                 .into_iter()
-                .flat_map(|fd| self.fds_to_close.remove(&fd))
-                .collect();
+                .flat_map(|fd| self.fds_to_close.remove(&fd));
 
             // if ACK came from the same PID, it means there is a duplicate PlatformHandle instance in the same
             // process. Thus we should leak the handles allowing other PlatformHandle's to safely close
             if message.pid == self.pid {
-                for h in fds_to_close.into_iter() {
+                for h in fds_to_close {
                     h.try_leak().unwrap_or_default();
                 }
+            } else {
+                // drain iterator closing all open file desriptors that were ACKed by the other party
+                fds_to_close.last();
             }
         }
         let mut item = message.item;
@@ -242,7 +243,9 @@ mod tests {
     fn get_open_file_descriptors(
         pid: Option<libc::pid_t>,
     ) -> Result<BTreeMap<RawFd, String>, io::Error> {
-        let proc = pid.map(|p| format!("{}", p)).unwrap_or("self".into());
+        let proc = pid
+            .map(|p| format!("{}", p))
+            .unwrap_or_else(|| "self".into());
 
         let fds_path = Path::new("/proc").join(proc).join("fd");
         let fds = std::fs::read_dir(fds_path)?

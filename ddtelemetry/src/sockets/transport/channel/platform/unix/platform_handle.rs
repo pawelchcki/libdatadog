@@ -110,9 +110,11 @@ impl<T> PlatformHandle<T> {
         })
     }
 
-    /// try_steall will pull File descriptor from shared data, potentially causing other users to perform
+    /// pull File descriptor from shared data, potentially causing other users to perform
     /// panicing operations
-    /// # Use with care
+    /// 
+    /// # Safety
+    /// Caller must avoid stealing a handle used e.g. in a HandleGuard to avoid potential panics elsewhere in the code
     pub unsafe fn try_steal(&self) -> Result<Self, io::Error> {
         let inner = Arc::new(self.inner.try_steal()?);
         Ok(Self {
@@ -122,6 +124,10 @@ impl<T> PlatformHandle<T> {
         })
     }
 
+    /// convert the type of handle
+    /// 
+    /// # Safety
+    /// caller must ensure the type is correct one otherwise as_instance and to_instance will return wrong instances
     pub unsafe fn to_any_type<Y>(self) -> PlatformHandle<Y> {
         PlatformHandle {
             fd: self.fd,
@@ -130,6 +136,7 @@ impl<T> PlatformHandle<T> {
         }
     }
 
+    /// RawFd innertype is safe to instantiate
     pub fn to_rawfd_type(self) -> PlatformHandle<RawFd> {
         unsafe { self.to_any_type() }
     }
@@ -250,6 +257,14 @@ impl Drop for PlatformHandleInner {
         }
     }
 }
+
+/// HandleGuard allows borrowing a PlatformHandle to create a temporary instance of a
+/// type that will call libc::close(fd) on Drop
+/// 
+/// It uses MaybeUninit to store and the instance, and swap it for an Uninit one in Drop
+/// then "leaking" the borrowed FileDescriptor 
+/// 
+/// The ownership of the FD lifecycle is handled by the associated PlatformHandleInner
 pub struct HandleGuard<T>
 where
     T: IntoRawFd,

@@ -175,7 +175,7 @@ pub(crate) mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         let mut sock = provider.take_writer_handle().unwrap();
-        sock.write("test".as_bytes()).unwrap();
+        sock.write_all("test".as_bytes()).unwrap();
         let mut buf = String::new();
         recv.read_to_string(&mut buf).unwrap();
         assert_eq!("test-mirror", buf);
