@@ -33,7 +33,7 @@ pub struct Message<Item> {
 }
 
 impl<Item> Message<Item> {
-    pub fn ref_item(& self) -> &Item {
+    pub fn ref_item(&self) -> &Item {
         &self.item
     }
 }
@@ -185,6 +185,10 @@ impl ChannelMetadata {
         self.reenqueue_for_sending(leftover);
 
         to_send
+    }
+
+    pub(crate) fn receive_fds(&mut self, fds: &[RawFd]) {
+        self.fds_received.append(&mut fds.to_vec().into());
     }
 
     pub(crate) fn find_handle<T>(&mut self, hint: &PlatformHandle<T>) -> Option<PlatformHandle<T>> {

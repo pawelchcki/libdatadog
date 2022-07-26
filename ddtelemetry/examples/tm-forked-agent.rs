@@ -13,7 +13,7 @@ use ddtelemetry::{
         BlockingTransport, Transport,
     },
 };
-use tarpc::server::Channel;
+use tarpc::{server::Channel, Response};
 
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -103,19 +103,22 @@ fn main() -> anyhow::Result<()> {
     })
     .unwrap();
 
-    let ch = pair.local().unwrap();
+    let mut ch = pair.local().unwrap();
+    ch.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    ch.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    
     let ch = BlockingTransport::from(ch);
 
     let mut joins = vec![];
-    for tn in 0..10 {
+    for tn in 0..1 {
         let mut ch = ch.clone();
         let th = thread::spawn(move || {
             for _n in (10000 * tn)..(10000 * (tn + 1)) {
-                ch.send_ignore_response(WorldRequest::Hello {
+                let item: Response<WorldResponse> = ch.send(WorldRequest::Hello {
                     name: (0..1000).map(|_| "ping".to_owned()).collect(),
                 })
                 .unwrap();
-                // println!("sent: {}", n);
+                println!("Received: {:?}", item);
             }
             std::thread::sleep(Duration::from_secs(2));
             println!("Finished sending");

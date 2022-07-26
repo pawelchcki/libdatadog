@@ -1,14 +1,14 @@
 use std::{
-    io::{self, Write, ErrorKind},
+    io::{self, Write, ErrorKind, Read},
     os::unix::{
         net::UnixStream,
         prelude::{FromRawFd, IntoRawFd, AsRawFd, RawFd},
-    },
+    }, time::Duration,
 };
 
-use sendfd::SendWithFd;
+use sendfd::{SendWithFd, RecvWithFd};
 
-use super::{PlatformHandle, ChannelMetadata};
+use super::{PlatformHandle, ChannelMetadata, MAX_FDS};
 
 #[derive(Debug)]
 pub struct Channel {
@@ -34,7 +34,31 @@ impl Channel {
         }
     }
 
-    pub fn send_message(&mut self, mut buf: &[u8]) -> Result<(), io::Error> {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), io::Error> {
+        let sock = self.inner.as_instance()?;
+        sock.set_read_timeout(timeout)
+    }
+
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), io::Error> {
+        let sock = self.inner.as_instance()?;
+        sock.set_write_timeout(timeout)
+    }
+}
+
+impl Read for Channel {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        println!("reading");
+        let mut fds = [0; MAX_FDS];
+        let socket = self.inner.as_instance()?;
+        let (n, fd_cnt) = socket.recv_with_fd(buf, &mut fds)?;
+        println!("read: {}", n);
+        self.metadata.receive_fds(&fds[..fd_cnt]);
+        Ok(n)
+    }
+}
+
+impl Write for Channel {
+    fn write_all(&mut self, mut buf: &[u8]) -> Result<(), io::Error> {
         let mut socket = self.inner.as_instance()?;
 
         while !buf.is_empty() {
@@ -80,6 +104,16 @@ impl Channel {
         }
         Ok(())
     }
+
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        //TODO implement partial writes
+        self.write_all(buf).map(|_| buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut socket = self.inner.as_instance()?;
+        socket.flush()
+    }
 }
 
 impl From<Channel> for PlatformHandle<UnixStream> {
@@ -91,21 +125,6 @@ impl From<Channel> for PlatformHandle<UnixStream> {
 impl From<PlatformHandle<UnixStream>> for Channel {
     fn from(h: PlatformHandle<UnixStream>) -> Self {
         Channel { inner: h, metadata: Default::default() }
-    }
-}
-
-impl Write for Channel {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut h = self.inner.as_instance()?;
-        // h.send_with_fd(bytes, fds)
-        h.write(buf)
-
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut h = self.inner.as_instance()?;
-
-        h.flush()
     }
 }
 

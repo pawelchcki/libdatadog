@@ -98,13 +98,11 @@ impl AsyncRead for AsyncChannel {
             let b = &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]);
             match project.inner.recv_with_fd(b, &mut fds) {
                 Ok((bytes_received, descriptors_received)) => {
-                    let fds = fds[..descriptors_received].to_vec();
                     project
                         .metadata
                         .lock()
                         .unwrap()
-                        .fds_received
-                        .append(&mut fds.into());
+                        .receive_fds(&fds[..descriptors_received]);
 
                     buf.assume_init(bytes_received);
                     buf.advance(bytes_received);

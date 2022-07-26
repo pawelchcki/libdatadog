@@ -1,40 +1,43 @@
 use std::{
-    io::{self},
+    io::{self, Read, Write},
+    mem::MaybeUninit,
     pin::Pin,
     sync::{atomic::AtomicU64, Arc},
     time::SystemTime,
 };
 
-use bytes::BytesMut;
-use serde::Serialize;
-use tarpc::{context, trace};
-use tokio_serde::{formats::SymmetricalMessagePack, Serializer};
-use tokio_util::codec::{Encoder, LengthDelimitedCodec};
+use bytes::{BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
+use tarpc::{context, trace, Response};
+use tokio_serde::{formats::MessagePack, Deserializer, Serializer};
+use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
 use super::{
     channel::{Channel, Message},
     handles::{HandlesTransport, TransferHandles},
 };
 
-pub struct BlockingTransport<Item> {
+pub struct BlockingTransport<IncomingItem, OutgoingItem> {
     channel: Channel,
     pid: libc::pid_t,
     requests_id: Arc<AtomicU64>,
-    codec: FramedBlocking<Message<ClientMessage<Item>>>,
+    codec: FramedBlocking<Message<Response<IncomingItem>>, Message<ClientMessage<OutgoingItem>>>,
 }
 
-impl<Item> Clone for BlockingTransport<Item> {
+impl<IncomingItem, OutgoingItem> Clone for BlockingTransport<IncomingItem, OutgoingItem> {
     fn clone(&self) -> Self {
         Self {
             channel: self.channel.clone(),
             pid: self.pid,
             requests_id: self.requests_id.clone(),
             codec: self.codec.clone(),
+            // TODO: how to ensure only a single instance of BlockingTransport can read at the same time
+            // without using locks :thinking:
         }
     }
 }
 
-impl<Item> From<Channel> for BlockingTransport<Item> {
+impl<IncomingItem, OutgoingItem> From<Channel> for BlockingTransport<IncomingItem, OutgoingItem> {
     fn from(c: Channel) -> Self {
         let pid = unsafe { libc::getpid() };
         BlockingTransport {
@@ -46,12 +49,12 @@ impl<Item> From<Channel> for BlockingTransport<Item> {
     }
 }
 
-pub struct FramedBlocking<Item> {
+pub struct FramedBlocking<IncomingItem, OutgoingItem> {
     len: LengthDelimitedCodec,
-    codec: Pin<Box<SymmetricalMessagePack<Item>>>,
+    codec: Pin<Box<MessagePack<IncomingItem, OutgoingItem>>>,
 }
 
-impl<Item> Clone for FramedBlocking<Item> {
+impl<IncomingItem, OutgoingItem> Clone for FramedBlocking<IncomingItem, OutgoingItem> {
     fn clone(&self) -> Self {
         Self {
             len: self.len.clone(),
@@ -60,7 +63,7 @@ impl<Item> Clone for FramedBlocking<Item> {
     }
 }
 
-impl<Item> Default for FramedBlocking<Item> {
+impl<IncomingItem, OutgoingItem> Default for FramedBlocking<IncomingItem, OutgoingItem> {
     fn default() -> Self {
         Self {
             len: Default::default(),
@@ -69,15 +72,33 @@ impl<Item> Default for FramedBlocking<Item> {
     }
 }
 
-impl<Item> Encoder<Item> for FramedBlocking<Item>
+impl<IncomingItem, OutgoingItem> Encoder<OutgoingItem>
+    for FramedBlocking<IncomingItem, OutgoingItem>
 where
-    Item: Serialize,
+    OutgoingItem: Serialize,
 {
     type Error = io::Error;
-    fn encode(&mut self, item: Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: OutgoingItem, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let data = self.codec.as_mut().serialize(&item)?;
 
         self.len.encode(data, dst)
+    }
+}
+
+impl<IncomingItem, OutgoingItem> Decoder for FramedBlocking<IncomingItem, OutgoingItem>
+where
+    IncomingItem: for<'de> Deserialize<'de>,
+{
+    type Item = IncomingItem;
+
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        println!("wtf: {}", src.len());
+        match self.len.decode(src)? {
+            Some(data) => self.codec.as_mut().deserialize(&data).map(|e| Some(e)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -125,7 +146,10 @@ where
     ) -> Result<(), Transport::Error> {
         match self {
             ClientMessage::Request(r) => r.receive_handles(transport),
-            ClientMessage::Cancel { trace_context: _, request_id: _ } => todo!(),
+            ClientMessage::Cancel {
+                trace_context: _,
+                request_id: _,
+            } => todo!(),
         }
     }
 }
@@ -149,11 +173,16 @@ where
     }
 }
 
-impl<Item> BlockingTransport<Item>
+impl<IncomingItem, OutgoingItem> BlockingTransport<IncomingItem, OutgoingItem>
 where
-    Item: Serialize + TransferHandles,
+    OutgoingItem: Serialize + TransferHandles,
+    IncomingItem: for<'de> Deserialize<'de> + TransferHandles,
 {
-    fn new_client_message(&self, item: Item, deadline: Option<SystemTime>) -> ClientMessage<Item> {
+    fn new_client_message(
+        &self,
+        item: OutgoingItem,
+        deadline: Option<SystemTime>,
+    ) -> ClientMessage<OutgoingItem> {
         let mut context = context::current();
 
         if let Some(deadline) = deadline {
@@ -171,9 +200,18 @@ where
         })
     }
 
-    pub fn send_ignore_response(&mut self, item: Item) -> Result<(), io::Error> {
+    pub fn send_ignore_response(&mut self, item: OutgoingItem) -> Result<(), io::Error> {
         let req = self.new_client_message(item, Some(SystemTime::UNIX_EPOCH));
+        self.do_send(req)
+    }
 
+    pub fn send(&mut self, item: OutgoingItem) -> Result<Response<IncomingItem>, io::Error> {
+        let req = self.new_client_message(item, None);
+        self.do_send(req)?;
+        self.receive_response()
+    }
+
+    fn do_send(&mut self, req: ClientMessage<OutgoingItem>) -> Result<(), io::Error> {
         let msg = self.channel.metadata.create_message(req)?;
 
         let mut buf = BytesMut::new();
@@ -184,6 +222,46 @@ where
             // with other users of the channel
         }
 
-        self.channel.send_message(&buf)
+        self.channel.write_all(&buf)
+    }
+
+    fn receive_response(&mut self) -> Result<Response<IncomingItem>, io::Error> {
+        let mut buf = BytesMut::with_capacity(4000);
+        while buf.has_remaining_mut() {
+            //TODO consider increasing this limit reading 1 byte might not be optimal
+            match self.codec.decode(&mut buf)? {
+                Some(message) => {
+                    let item = self.channel.metadata.unwrap_message(message)?;
+                    return Ok(item);
+                }
+                None => {
+                    let n = unsafe {
+                        let dst = buf.chunk_mut();
+                        let dst = &mut *(dst as *mut _ as *mut [MaybeUninit<u8>]);
+                        let mut buf_window = tokio::io::ReadBuf::uninit(dst);
+
+                        let b = &mut *(buf_window.unfilled_mut()
+                            as *mut [std::mem::MaybeUninit<u8>]
+                            as *mut [u8]);
+
+                        let n = self.channel.read(b)?;
+                        buf_window.assume_init(n);
+                        buf_window.advance(n);
+
+                        buf_window.filled().len()
+                    };
+
+                    // Safety: This is guaranteed to be the number of initialized (and read)
+                    // bytes due to the invariants provided by `ReadBuf::filled`.
+                    unsafe {
+                        buf.advance_mut(n);
+                    }
+                }
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "couldn't read entire item",
+        ))
     }
 }

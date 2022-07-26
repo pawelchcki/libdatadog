@@ -154,6 +154,3 @@ where
         Ok(Self::from(AsyncChannel::try_from(channel)?))
     }
 }
-
-#[cfg(test)]
-mod tests;
