@@ -4,18 +4,19 @@ name = "spawn_worker"
 version = "0.0.1"
 
 [dependencies]
-anyhow = { version = "1.0" }
-tempfile = { version = "3.3" }
-io-lifetimes = { version = "1.0" }
+anyhow = {version = "1.0"}
+io-lifetimes = {version = "1.0"}
 smallvec = {version = "1.10", features = ["const_generics"]}
+tempfile = {version = "3.3"}
 
 [target.'cfg(not(windows))'.dependencies]
-nix = { version = "0.26" }
-memfd = { version = "0.6" }
-
+memfd = {version = "0.6"}
+nix = {version = "0.26"}
 
 [build-dependencies]
-cc_utils = { path = "../tools/cc_utils" }
+cc_utils = {path = "../tools/cc_utils"}
+[dev-dependencies]
+ddcommon = {path = "../ddcommon", default-features = false}
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rlimit = {version = "0.9"}

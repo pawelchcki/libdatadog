@@ -2,7 +2,7 @@ use std::{
     sync::{
         atomic::{
             AtomicUsize,
-            Ordering::{Acquire, Relaxed},
+            Ordering::{Acquire, Relaxed, self}, AtomicIsize,
         },
         Arc,
     },
@@ -100,20 +100,20 @@ impl AsyncRead for UnixStreamTracked {
 
 #[derive(Debug, Default)]
 pub struct Tracker {
-    count: Arc<AtomicUsize>,
+    count: Arc<AtomicIsize>,
     notifier: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for Tracker {
     fn drop(&mut self) {
-        self.count.fetch_sub(1, Relaxed);
+        self.count.fetch_sub(1, Ordering::AcqRel);
         self.notifier.notify_waiters();
     }
 }
 
 impl Clone for Tracker {
     fn clone(&self) -> Self {
-        self.count.fetch_add(1, Relaxed);
+        self.count.fetch_add(1, Ordering::AcqRel);
         self.notifier.notify_waiters();
         Self {
             count: self.count.clone(),
@@ -132,19 +132,20 @@ impl Tracker {
 }
 
 pub struct TrackerWatcher {
-    count: Arc<AtomicUsize>,
+    count: Arc<AtomicIsize>,
     notifier: Arc<tokio::sync::Notify>,
 }
 
 impl TrackerWatcher {
-    pub async fn wait_for_no_instances(&self, min_duration_without_instances: Duration) {
+    pub async fn wait_for_no_instances(&self, slack_time: Duration) {
         let mut prev_count = self.count.load(Relaxed);
         let mut prev_time = tokio::time::Instant::now();
         loop {
-            if timeout(min_duration_without_instances, self.notifier.notified())
+
+            if timeout(slack_time, self.notifier.notified())
                 .await
                 .is_err()
-                && prev_count == 0
+                && prev_count == 0  
             {
                 return;
             }
@@ -152,7 +153,7 @@ impl TrackerWatcher {
             let count = self.count.load(Acquire);
             if prev_count == count
                 && count == 0
-                && prev_time.elapsed() >= min_duration_without_instances
+                && prev_time.elapsed() >= slack_time
             {
                 return;
             }

@@ -85,7 +85,7 @@ fn enter_listener_loop(listener: StdUnixListener) -> anyhow::Result<()> {
 
 #[no_mangle]
 pub extern "C" fn daemon_entry_point() {
-    if let Some(fd) = spawn_worker::recv_passed_fd() {
+    if let Some(fd) = spawn_worker::recv_passed_fd().ok() {
         let listener: StdUnixListener = fd.into();
 
         println!("starting sidecar, pid: {}", nix::unistd::getpid().as_raw());

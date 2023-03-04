@@ -54,4 +54,4 @@ criterion = "0.3"
 [target.'cfg(not(windows))'.dependencies]
 libc = {version = "0.2"}
 nix = {version = "0.24", features = ["fs", "socket"]}
-sendfd = {version = "0.4", features = ["tokio"]}
+sendfd = { git = "https://github.com/pawelchcki/sendfd.git", features = ["tokio"]}

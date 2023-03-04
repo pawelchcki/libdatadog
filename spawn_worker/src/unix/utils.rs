@@ -8,6 +8,8 @@ use std::{
 use nix::libc;
 use smallvec::SmallVec;
 
+use self::ext::CStrExt;
+
 pub mod raw_env {
     use nix::libc;
 
@@ -98,6 +100,13 @@ pub unsafe fn get_dl_path_raw(addr: *const libc::c_void) -> (Option<CString>, Op
     (path_name, symbol_name)
 }
 
+/// On Stack vector that holds data that can be passed to C functions
+/// that need a null terminated list of null terminated strings
+///
+/// example uses: execve fn
+///
+/// Additionally it can store CString values to facilitate keeping
+/// heap allocated strings alongside a purely referential struct
 pub struct ExecVec<const N: usize> {
     heap_items: SmallVec<[CString; 0]>,
     // Always NULL ptr terminated
@@ -109,6 +118,10 @@ impl<const N: usize> ExecVec<N> {
         self.ptrs.as_ptr()
     }
 
+    pub fn as_mut_ptr(&mut self) -> *mut *const libc::c_char {
+        self.ptrs.as_mut_ptr()
+    }
+
     pub fn empty() -> Self {
         let mut ptrs = SmallVec::new();
         ptrs.push(std::ptr::null());
@@ -118,25 +131,67 @@ impl<const N: usize> ExecVec<N> {
         }
     }
 
-    pub fn push_cstr(&mut self, item: &CStr) {
+    /// # Safety
+    ///
+    /// caller must ensure that all data pointed by cstrs will live
+    /// for as long as ExecVec will live
+    pub unsafe fn from_slice(src: &[&CStr]) -> Self {
+        let mut ptrs = SmallVec::new();
+        for str in src {
+            ptrs.push(str.as_ptr());
+        }
+        ptrs.push(std::ptr::null());
+
+        ExecVec {
+            heap_items: SmallVec::new(),
+            ptrs: ptrs,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// caller must ensure the cstr will live for as long as ExecVec is valid
+    pub unsafe fn push_cstr(&mut self, item: &CStr) {
         self.push_ptr(item.as_ptr());
     }
 
     pub fn push_cstring(&mut self, item: CString) {
         let ptr = item.as_ptr();
         self.heap_items.push(item);
-        self.push_ptr(ptr);
+        unsafe { self.push_ptr(ptr) };
     }
 
-    pub fn push_ptr(&mut self, item: *const libc::c_char) {
-        let l = self.ptrs.len();
+    /// # Safety
+    ///
+    /// caller must ensure the ptr will live for as long as ExecVec is valid
+    pub unsafe fn push_ptr(&mut self, ptr: *const libc::c_char) {
         // replace previous trailing null with ptr to the item
-        self.ptrs[l - 1] = item;
-        self.ptrs.push(std::ptr::null());
+
+        // check for additional nulls in the array - in case the
+        // ptr array was modified out of bounds
+        let number_of_strings = self.len();
+
+        // ensure array has enough space for new ptr and the trailing null
+        self.ptrs.resize(number_of_strings + 2, std::ptr::null());
+        // append the pointer
+        self.ptrs[number_of_strings] = ptr;
+    }
+
+    /// number of string pointers in the clist
+    pub fn len(&self) -> usize {
+        let mut actual_length = self.ptrs.len();
+        for i in (0..actual_length).rev() {
+            if self.ptrs[i] == std::ptr::null() {
+                actual_length = i;
+            }
+        }
+        actual_length
+    }
+
+    pub fn as_clist<'a>(&'a mut self) -> CListMutPtr<'a> {
+        unsafe { CListMutPtr::from_raw_parts(self.as_mut_ptr()) }
     }
 }
-
-// pub struct CListMutPtr<'a
 
 pub struct CListMutPtr<'a> {
     inner: &'a mut [*const libc::c_char],
@@ -182,18 +237,32 @@ impl<'a> CListMutPtr<'a> {
     ///
     /// # Safety
     /// entries in self.inner must be valid null terminated c strings
-    pub unsafe fn remove_entry<F: Fn(&[u8]) -> bool>(
-        &mut self,
-        predicate: F,
-    ) -> Option<*const libc::c_char> {
+    pub unsafe fn remove_entry<M: EntryByteMatcher>(&mut self, matcher: M) -> Option<&CStr> {
         for i in (0..self.elements).rev() {
             let elem = CStr::from_ptr(self.inner[i]);
-            if predicate(elem.to_bytes()) {
+            if matcher.matches_bytes(elem.to_bytes()) {
                 for src in i + 1..self.elements {
                     self.inner[src - 1] = self.inner[src]
                 }
                 self.elements -= 1;
-                return Some(elem.as_ptr());
+                self.inner[self.elements] = std::ptr::null();
+
+                return Some(elem);
+            }
+        }
+
+        None
+    }
+
+    /// get entry from a slice
+    ///
+    /// # Safety
+    /// entries in self.inner must be valid null terminated c strings
+    pub unsafe fn get_entry<M: EntryByteMatcher>(&mut self, matcher: M) -> Option<&CStr> {
+        for i in (0..self.elements).rev() {
+            let elem = CStr::from_ptr(self.inner[i]);
+            if matcher.matches_bytes(elem.to_bytes()) {
+                return Some(elem);
             }
         }
 
@@ -222,6 +291,10 @@ impl<'a> CListMutPtr<'a> {
         None
     }
 
+    pub fn len(&self) -> usize {
+        self.elements
+    }
+
     /// create exec vec with size N allocated on stack, and copy all pointer there,
     /// if there are more entries than N - ExecVec will allocate more space on heap
     ///
@@ -236,5 +309,148 @@ impl<'a> CListMutPtr<'a> {
             vec.push_ptr(self.inner[i]);
         }
         vec
+    }
+}
+
+pub mod ext {
+    use std::ffi::CStr;
+
+    pub trait CStrExt {
+        /// Splits CStr into two parts based on supplied character
+        ///
+        /// it will not do any additional allcoation, and will reuse the memory
+        /// pointed to by CStr
+        ///
+        /// first part, preceeding the character is returned as slice
+        ///
+        /// second part can be returned as valid &CStr because
+        /// it will be properly null terminated
+        fn split_once(&self, c: u8) -> (&[u8], &CStr);
+    }
+    impl CStrExt for CStr {
+        fn split_once(&self, c: u8) -> (&[u8], &CStr) {
+            let bytes = self.to_bytes_with_nul();
+            for i in 0..bytes.len() - 1 {
+                if bytes[i] == c {
+                    // safety: we're processing existing CStr so its guaranteed to be null terminated
+                    return (&bytes[0..i], unsafe {
+                        CStr::from_bytes_with_nul_unchecked(&bytes[i + 1..])
+                    });
+                }
+            }
+            (&[], self)
+        }
+    }
+}
+
+pub trait EntryByteMatcher {
+    fn matches_bytes(&self, data: &[u8]) -> bool;
+}
+
+pub struct EnvKey<'a>(&'a [u8]);
+
+impl<'a> EnvKey<'a> {
+    pub const fn from(str: &'a str) -> Self {
+        EnvKey(str.as_bytes())
+    }
+
+    pub fn get_value(src: &CStr) -> &CStr {
+        let (_, val) = src.split_once(b'=');
+        val
+    }
+
+    pub fn build_c_env<S: AsRef<str>>(&self, val: S) -> anyhow::Result<CString>{
+        let str = String::from_utf8(self.0.to_vec())? + "=" + val.as_ref();
+
+        Ok(CString::new(str)?)
+    }
+}
+
+impl<'a> From<&'a CStr> for EnvKey<'a> {
+    fn from(str: &'a CStr) -> Self {
+        EnvKey(str.to_bytes())
+    }
+}
+
+impl<'a> From<&'a str> for EnvKey<'a> {
+    fn from(str: &'a str) -> Self {
+        EnvKey(str.as_bytes())
+    }
+}
+
+impl<'a> EntryByteMatcher for EnvKey<'a> {
+    fn matches_bytes(&self, data: &[u8]) -> bool {
+        let key = self.0;
+        // data must be key.len + 1 char long at least as it must also hold '=' char
+        if data.len() <= key.len() {
+            return false;
+        }
+
+        if !data.starts_with(key) {
+            return false;
+        }
+
+        // key found in start of data, now it should be followed by '=' char
+        data[key.len()] == b'='
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ddcommon::cstr;
+
+    use super::{ext::CStrExt, CListMutPtr, EnvKey, ExecVec};
+
+    #[test]
+    fn test_clist_element_fetch_and_removal() {
+        let mut vec = ExecVec::<10>::empty();
+        unsafe { vec.push_cstr(cstr!("hello")) };
+        unsafe { vec.push_cstr(cstr!("ehlo=")) };
+        unsafe { vec.push_cstr(cstr!("1")) };
+        unsafe { vec.push_cstr(cstr!("2")) };
+        assert_eq!(4, vec.len());
+
+        let mut clist: CListMutPtr = vec.as_clist();
+        // fetch entry from CList
+        assert_eq!(
+            cstr!("ehlo="),
+            unsafe { clist.get_entry(EnvKey::from("ehlo")) }.unwrap()
+        );
+        // remove entry from CList
+        assert_eq!(
+            cstr!("ehlo="),
+            unsafe { clist.remove_entry(EnvKey::from("ehlo")) }.unwrap()
+        );
+        assert_eq!(3, clist.len());
+        // underlying vec should be updated as well
+        assert_eq!(3, vec.as_clist().len());
+        assert_eq!(3, vec.len());
+        unsafe {
+            assert_eq!(
+                vec![cstr!("hello").to_owned(),cstr!("1").to_owned(),cstr!("2").to_owned()],
+                vec.as_clist().to_owned_vec()
+            )
+        };
+    }
+    #[test]
+    fn test_exec_vec_cstr_lifetime() {
+        let str = cstr!("a string").to_owned();
+        let mut vec = ExecVec::<10>::empty();
+        unsafe { vec.push_cstr(str.as_c_str()) };
+        // CString must not be dropped now
+
+        unsafe {
+            assert_eq!(
+                vec![cstr!("a string").to_owned()],
+                vec.as_clist().to_owned_vec()
+            )
+        };
+    }
+
+    #[test]
+    fn test_split_cstr() {
+        let (bytes, str) = cstr!("string_a=string_b").split_once(b'=');
+        assert_eq!(b"string_a", bytes);
+        assert_eq!(cstr!("string_b"), str);
     }
 }

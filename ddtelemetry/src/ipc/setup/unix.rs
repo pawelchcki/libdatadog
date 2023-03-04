@@ -50,6 +50,12 @@ impl Liaison for SharedDirLiaison {
     fn attempt_listen(&self) -> io::Result<Option<UnixListener>> {
         let dir = self.socket_path.parent().unwrap_or_else(|| Path::new("/"));
         ensure_dir_exists(dir)?;
+        if self.socket_path.exists() {
+            // if socket is already listening, then creating listener is not available
+            if platform::sockets::is_listening(&self.socket_path)? {
+                return Ok(None);
+            }
+        }
 
         let _g = match FLock::try_rw_lock(&self.lock_path) {
             Ok(lock) => lock,

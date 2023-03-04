@@ -1840,8 +1840,7 @@ checksum = "58bc9567378fc7690d6b2addae4e60ac2eeea07becb2c64b9f218b53865cba2a"
 [[package]]
 name = "sendfd"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "604b71b8fc267e13bb3023a2c901126c8f349393666a6d98ac1ae5729b701798"
+source = "git+https://github.com/pawelchcki/sendfd.git#5f0f9cd30dd1bdbf44407392755f5821a33f7b7b"
 dependencies = [
  "libc",
  "tokio",
@@ -1912,6 +1911,7 @@ dependencies = [
  "nix 0.26.2",
  "pin-project",
  "pretty_env_logger",
+ "rand",
  "rmp-serde 1.1.1",
  "serde",
  "serde_json",
@@ -1919,6 +1919,8 @@ dependencies = [
  "spawn_worker",
  "tokio",
  "tokio-test",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1961,6 +1963,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "cc_utils",
+ "ddcommon",
  "io-lifetimes 1.0.5",
  "memfd",
  "nix 0.26.2",

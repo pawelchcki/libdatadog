@@ -12,7 +12,7 @@ use spawn_worker::{entrypoint, recv_passed_fd};
 pub extern "C" fn exported_entrypoint() {
     println!("stdout_works_as_expected");
     eprintln!("stderr_works_as_expected");
-    if let Some(fd) = recv_passed_fd() {
+    if let Some(fd) = recv_passed_fd().ok() {
         let mut shared_file: File = fd.into();
         writeln!(shared_file, "shared_file_works_as_expected").unwrap();
     }

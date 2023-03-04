@@ -26,7 +26,8 @@ pub mod info;
 pub mod ipc;
 pub mod metrics;
 pub mod worker;
-
+pub use tarpc; //HACKATHON
+pub use uuid; //HACKATHON
 const DEFAULT_API_VERSION: data::ApiVersion = data::ApiVersion::V1;
 
 fn runtime_id() -> &'static str {

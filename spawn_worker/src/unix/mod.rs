@@ -34,14 +34,14 @@ impl Entrypoint {
 
 pub(crate) static ENV_PASS_FD_KEY: &str = "__DD_INTERNAL_PASSED_FD";
 
-pub fn recv_passed_fd() -> Option<OwnedFd> {
-    let val = env::var(ENV_PASS_FD_KEY).ok()?;
-    let fd: RawFd = val.parse().ok()?;
+pub fn recv_passed_fd() -> anyhow::Result<OwnedFd> {
+    let val = env::var(ENV_PASS_FD_KEY)?;
+    let fd: RawFd = val.parse()?;
 
     // check if FD number is valid
-    nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD).ok()?;
+    nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD)?;
 
-    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 #[macro_export]
