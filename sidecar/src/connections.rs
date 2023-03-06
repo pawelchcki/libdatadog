@@ -1,8 +1,8 @@
 use std::{
     sync::{
         atomic::{
-            AtomicUsize,
-            Ordering::{Acquire, Relaxed, self}, AtomicIsize,
+            AtomicIsize, AtomicUsize,
+            Ordering::{self, Acquire, Relaxed},
         },
         Arc,
     },
@@ -141,20 +141,12 @@ impl TrackerWatcher {
         let mut prev_count = self.count.load(Relaxed);
         let mut prev_time = tokio::time::Instant::now();
         loop {
-
-            if timeout(slack_time, self.notifier.notified())
-                .await
-                .is_err()
-                && prev_count == 0  
-            {
+            if timeout(slack_time, self.notifier.notified()).await.is_err() && prev_count == 0 {
                 return;
             }
 
             let count = self.count.load(Acquire);
-            if prev_count == count
-                && count == 0
-                && prev_time.elapsed() >= slack_time
-            {
+            if prev_count == count && count == 0 && prev_time.elapsed() >= slack_time {
                 return;
             }
 

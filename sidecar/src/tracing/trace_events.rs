@@ -34,7 +34,7 @@ impl ToString for MetaKey {
             MetaKey::String(s) => s.clone(),
             MetaKey::CmdCurrentWorkingDirectory => "current_working_directory".into(),
             MetaKey::CmdOriginPid => "pid".into(),
-            MetaKey::ExecutablePath => "executable_path".into(),  
+            MetaKey::ExecutablePath => "executable_path".into(),
         }
     }
 }
@@ -99,7 +99,7 @@ pub struct SpanStart {
 impl From<Box<SpanStart>> for pb::Span {
     fn from(span_start: Box<SpanStart>) -> Self {
         let mut meta = HashMap::new();
-        for (k,v) in span_start.meta {
+        for (k, v) in span_start.meta {
             meta.insert(k.to_string(), v.to_string());
         }
         Self {

@@ -1,4 +1,7 @@
-use std::{ffi::{self, CString}, collections::HashSet};
+use std::{
+    collections::HashSet,
+    ffi::{self, CString},
+};
 
 use ddcommon::cstr;
 use nix::libc;
@@ -50,18 +53,16 @@ unsafe extern "C" fn new_main(
     let mut env = raw_env::as_clist();
 
     // TODO: skip sidecar launching in children - maybe? to speed things up - more testing needed
-    // TODO: ld preload also was launched in sidecars... how this did not create a worse race condition I have no idea! :) 
-    let ld_preload = env.remove_entry(EnvKey::from("LD_PRELOAD")).map(|f| f.to_owned()); 
+    // TODO: ld preload also was launched in sidecars... how this did not create a worse race condition I have no idea! :)
+    let ld_preload = env
+        .remove_entry(EnvKey::from("LD_PRELOAD"))
+        .map(|f| f.to_owned());
     let path = match env.get_entry(ENVKEY_MINI_AGENT_STARTED) {
         Some(_) => None,
-        None => {
-            wrap_result(|| Ok(crate::mini_agent::maybe_start()?))
-        },
+        None => wrap_result(|| Ok(crate::mini_agent::maybe_start()?)),
     };
 
-    let transport = wrap_result(|| {
-        Ok(ipc_agent::maybe_start()?)
-    });
+    let transport = wrap_result(|| Ok(ipc_agent::maybe_start()?));
     // TODO: resolve this in a nicer way
     let tracing_enabled = env.get_entry(ENVKEY_TRACING_ENABLED).is_some();
 
@@ -77,7 +78,7 @@ unsafe extern "C" fn new_main(
             };
 
             context.store_in_c_env(&mut env)?;
-            if let Some(mut transport) = transport { 
+            if let Some(mut transport) = transport {
                 let cmd = CListMutPtr::from_raw_parts(argv as *mut *const libc::c_char);
                 transport.span_started(context.span_start(&cmd))?;
             }
@@ -86,11 +87,11 @@ unsafe extern "C" fn new_main(
     });
 
     if let Some(path) = path {
-        wrap_result(||{
-            env.push_cstring(ENVKEY_DD_TRACE_AGENT_URL.build_c_env(format!(
-                "unix://{}",
-                path.to_string_lossy()
-            ))?);
+        wrap_result(|| {
+            env.push_cstring(
+                ENVKEY_DD_TRACE_AGENT_URL
+                    .build_c_env(format!("unix://{}", path.to_string_lossy()))?,
+            );
             env.push_cstring(ENVKEY_MINI_AGENT_STARTED.build_c_env("true")?);
 
             Ok(())
@@ -99,7 +100,7 @@ unsafe extern "C" fn new_main(
 
     if let Some(ld_preload) = ld_preload {
         env.push_cstring(ld_preload);
-    } 
+    }
 
     let old_environ = raw_env::swap(env.as_ptr());
 

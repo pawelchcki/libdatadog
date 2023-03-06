@@ -144,7 +144,7 @@ impl<const N: usize> ExecVec<N> {
 
         ExecVec {
             heap_items: SmallVec::new(),
-            ptrs: ptrs,
+            ptrs,
         }
     }
 
@@ -359,7 +359,7 @@ impl<'a> EnvKey<'a> {
         val
     }
 
-    pub fn build_c_env<S: AsRef<str>>(&self, val: S) -> anyhow::Result<CString>{
+    pub fn build_c_env<S: AsRef<str>>(&self, val: S) -> anyhow::Result<CString> {
         let str = String::from_utf8(self.0.to_vec())? + "=" + val.as_ref();
 
         Ok(CString::new(str)?)
@@ -427,7 +427,11 @@ mod tests {
         assert_eq!(3, vec.len());
         unsafe {
             assert_eq!(
-                vec![cstr!("hello").to_owned(),cstr!("1").to_owned(),cstr!("2").to_owned()],
+                vec![
+                    cstr!("hello").to_owned(),
+                    cstr!("1").to_owned(),
+                    cstr!("2").to_owned()
+                ],
                 vec.as_clist().to_owned_vec()
             )
         };

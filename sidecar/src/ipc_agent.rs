@@ -1,6 +1,9 @@
 use std::{
     fs::File,
-    os::{fd::{IntoRawFd, AsRawFd}, unix::net::UnixListener as StdUnixListener},
+    os::{
+        fd::{AsRawFd, IntoRawFd},
+        unix::net::UnixListener as StdUnixListener,
+    },
     sync::{
         atomic::{AtomicI32, Ordering},
         Arc,
@@ -16,18 +19,25 @@ use ddtelemetry::{
 use spawn_worker::{entrypoint, Stdio};
 use tokio::{net::UnixListener, select};
 
-use crate::{ipc::{SidecarServer, SidecarTransport}, rust_tracing, tracing::{uploader::Uploader, trace_events::{EventCollector, self}}};
+use crate::{
+    ipc::{SidecarServer, SidecarTransport},
+    rust_tracing,
+    tracing::{
+        trace_events::{self, EventCollector},
+        uploader::Uploader,
+    },
+};
 
 async fn main_loop(listener: UnixListener) -> tokio::io::Result<()> {
     let counter = Arc::new(AtomicI32::new(0));
     let token = CancellationToken::new();
     let cloned_counter = Arc::clone(&counter);
     let cloned_token = token.clone();
-    
+
     let (payload_tx, payload_rx) = tokio::sync::mpsc::channel::<Box<TracerPayload>>(10);
     let uploader = Uploader::init(&crate::config::Config::init());
     tokio::spawn(uploader.into_event_loop(payload_rx));
-    
+
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<trace_events::Event>(100);
     let event_collector = EventCollector::init(&crate::config::Config::init());
     tokio::spawn(event_collector.into_event_loop(payload_tx, event_rx));
@@ -79,7 +89,7 @@ pub extern "C" fn ipc_agent_entrypoint() {
         // rust_tracing::enable_tracing().unwrap();
         eprintln!("starting sidecar");
         let listener: StdUnixListener = spawn_worker::recv_passed_fd()?.try_into()?;
-    
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -87,7 +97,7 @@ pub extern "C" fn ipc_agent_entrypoint() {
         let _g = rt.enter();
         listener.set_nonblocking(true).unwrap();
         let listener = UnixListener::from_std(listener).unwrap();
-    
+
         rt.block_on(main_loop(listener)).unwrap();
 
         Ok(())

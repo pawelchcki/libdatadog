@@ -1,11 +1,16 @@
-use std::{time::Duration, collections::{HashMap, HashSet}};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
-use datadog_trace_protobuf::{pb::{TracerPayload, AgentPayload, TraceChunk}, prost::Message};
-use hyper::{Request, Method};
+use datadog_trace_protobuf::{
+    pb::{AgentPayload, TraceChunk, TracerPayload},
+    prost::Message,
+};
+use hyper::{Method, Request};
 use tokio::sync::mpsc::Receiver;
 
 use crate::data::v04;
-
 
 pub struct Uploader {
     tracing_config: crate::config::TracingConfig,
@@ -34,7 +39,7 @@ impl Uploader {
 
         for s in &mut chunk.spans {
             if !span_ids.contains(&s.parent_id) {
-                return Some(s)
+                return Some(s);
             }
         }
 

@@ -14,7 +14,7 @@ use hyper::service::Service;
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 
 use tokio::net::UnixListener;
-use tokio::sync::mpsc::{Sender, Receiver};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::connections::UnixListenerTracked;
 use crate::data::v04::{self};
