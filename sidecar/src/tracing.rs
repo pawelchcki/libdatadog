@@ -77,9 +77,9 @@ const ENV_SPAN_ID: EnvKey = EnvKey::from("DD_EXEC_T_SPAN_ID");
 
 #[derive(Clone, Debug)]
 pub struct TraceContext {
-    trace_id: Id,
-    span_id: Id,
-    parent_span_id: Option<Id>,
+    pub trace_id: Id,
+    pub span_id: Id,
+    pub parent_span_id: Option<Id>,
 }
 
 impl Default for TraceContext {

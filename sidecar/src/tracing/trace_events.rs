@@ -66,6 +66,7 @@ impl ToString for MetaValue {
 pub enum Event {
     StartSpan(Box<SpanStart>),
     SpanFinished(SpanFinished),
+    ProcessCrashed(SegfaultNotification),
     ReportError(ReportError), //todo unused yet
 }
 
@@ -75,6 +76,7 @@ impl Event {
             Event::StartSpan(s) => &s.trace_id,
             Event::SpanFinished(s) => &s.trace_id,
             Event::ReportError(e) => &e.trace_id,
+            Event::ProcessCrashed(e) => &e.trace_id,
         }
     }
 }
@@ -97,6 +99,8 @@ pub struct SpanStart {
     pub span_end_socket: Option<PlatformHandle<UnixStream>>,
     pub meta: HashMap<MetaKey, MetaValue>,
 }
+
+
 
 impl From<Box<SpanStart>> for pb::Span {
     fn from(span_start: Box<SpanStart>) -> Self {
@@ -139,6 +143,12 @@ pub struct SpanFinished {
 pub struct SegfaultNotification {
     pub id: Id,
     pub trace_id: Id,
+}
+
+impl EventConsume for SegfaultNotification {
+    fn apply_into(self, span: &mut pb::Span) {
+        span.error = 1;
+    }
 }
 
 impl EventConsume for SpanFinished {
@@ -296,6 +306,12 @@ impl EventCollector {
                 },
                 Event::StartSpan(_) => {}
                 Event::ReportError(_) => todo!(),
+                Event::ProcessCrashed(c) => {
+                    match spans.get_mut(&c.id) {
+                        Some(s) => c.apply_into(s),
+                        None => unmatched_cnt += 1,
+                    }
+                }
             }
         }
         if unmatched_cnt > 0 {

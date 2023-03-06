@@ -22,8 +22,6 @@ use crate::tracing::{
     trace_events::{self, SpanFinished},
 };
 
-
-
 #[tarpc::service]
 pub trait SidecarInterface {
     async fn notify() -> ();
@@ -88,12 +86,23 @@ impl SidecarInterface for SidecarServer {
 
     type SegfaultFut = Pending<()>;
 
-    fn segfault(self,_:tarpc::context::Context,msg:trace_events::SegfaultNotification) -> Self::SegfaultFut {
+    fn segfault(
+        self,
+        _: tarpc::context::Context,
+        msg: trace_events::SegfaultNotification,
+    ) -> Self::SegfaultFut {
         println!("SEGFAULT: {:?}", msg);
+        let event_tx = self.event_tx.clone();
+
+        tokio::task::spawn(async move {
+            event_tx
+                .send(trace_events::Event::ProcessCrashed(msg))
+                .await
+                .ok();
+        });
+
         std::future::pending() //don't send back the response
     }
-
-    
 }
 
 fn finalize_span_via_socket_auto_close(
@@ -185,6 +194,7 @@ mod handles_impl {
     }
 }
 
+#[derive(Clone)]
 pub struct SidecarTransport {
     transport: BlockingTransport<SidecarInterfaceResponse, SidecarInterfaceRequest>,
 }
@@ -199,5 +209,14 @@ impl SidecarTransport {
         Ok(self
             .transport
             .send_ignore_response(SidecarInterfaceRequest::SpanStarted { msg: span_start })?)
+    }
+
+    pub fn crash_happened(
+        &mut self,
+        msg: trace_events::SegfaultNotification,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .transport
+            .send_ignore_response(SidecarInterfaceRequest::Segfault { msg })?)
     }
 }

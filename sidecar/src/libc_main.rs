@@ -3,12 +3,13 @@ use std::{
     ffi::{self, CString},
 };
 
+use crash_handler::CrashHandler;
 use ddcommon::cstr;
 use nix::libc;
 
 use spawn_worker::utils::{raw_env, CListMutPtr, EnvKey, ExecVec};
 
-use crate::{ipc_agent, tracing::TraceContext};
+use crate::{ipc_agent, tracing::{TraceContext, trace_events::SegfaultNotification}, ipc::SidecarTransport};
 
 type StartMainFn = extern "C" fn(
     main: MainFn,
@@ -44,6 +45,20 @@ where
     }
 }
 
+static mut HANDLER: Option<CrashHandler> = None;
+
+unsafe fn handle_crash(transport: SidecarTransport, trace_ctx: TraceContext) {
+    let handler = crash_handler::CrashHandler::attach(crash_handler::make_crash_event(move |cc: &crash_handler::CrashContext|{
+        let mut transport = transport.clone();
+        transport.crash_happened(SegfaultNotification{
+            id: trace_ctx.span_id.clone(),
+            trace_id: trace_ctx.trace_id.clone(),
+        }).ok();
+
+        crash_handler::CrashEventResult::Handled(false)
+    })).ok();
+    HANDLER = handler
+}
 
 
 #[allow(dead_code)]
@@ -83,6 +98,7 @@ unsafe extern "C" fn new_main(
 
             context.store_in_c_env(&mut env)?;
             if let Some(mut transport) = transport {
+                handle_crash(transport.clone(), context.clone());
                 let cmd = CListMutPtr::from_raw_parts(argv as *mut *const libc::c_char);
                 transport.span_started(context.span_start(&cmd))?;
             }
