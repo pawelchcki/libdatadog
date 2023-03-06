@@ -22,10 +22,13 @@ use crate::tracing::{
     trace_events::{self, SpanFinished},
 };
 
+
+
 #[tarpc::service]
 pub trait SidecarInterface {
     async fn notify() -> ();
     async fn span_started(msg: trace_events::SpanStart) -> ();
+    async fn segfault(msg: trace_events::SegfaultNotification) -> ();
 }
 
 #[derive(Clone)]
@@ -82,6 +85,15 @@ impl SidecarInterface for SidecarServer {
         });
         std::future::pending() //don't send back the response
     }
+
+    type SegfaultFut = Pending<()>;
+
+    fn segfault(self,_:tarpc::context::Context,msg:trace_events::SegfaultNotification) -> Self::SegfaultFut {
+        println!("SEGFAULT: {:?}", msg);
+        std::future::pending() //don't send back the response
+    }
+
+    
 }
 
 fn finalize_span_via_socket_auto_close(

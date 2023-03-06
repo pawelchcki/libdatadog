@@ -44,6 +44,8 @@ where
     }
 }
 
+
+
 #[allow(dead_code)]
 unsafe extern "C" fn new_main(
     argc: ffi::c_int,
@@ -67,7 +69,9 @@ unsafe extern "C" fn new_main(
     let tracing_enabled = env.get_entry(ENVKEY_TRACING_ENABLED).is_some();
 
     let parent_context = TraceContext::extract_from_c_env(&mut env);
-    env.remove_entry(EnvKey::from("DD_TRACE_AGENT_URL"));
+    if path.is_some() {
+        env.remove_entry(EnvKey::from("DD_TRACE_AGENT_URL"));
+    }
     let mut env: ExecVec<10> = env.into_exec_vec();
 
     wrap_result(|| {
@@ -96,7 +100,7 @@ unsafe extern "C" fn new_main(
 
             Ok(())
         });
-    }
+    } 
 
     if let Some(ld_preload) = ld_preload {
         env.push_cstring(ld_preload);
@@ -113,6 +117,7 @@ unsafe extern "C" fn new_main(
     raw_env::swap(old_environ);
     rv
 }
+
 
 /// # Safety
 ///

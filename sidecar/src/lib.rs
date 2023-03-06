@@ -8,6 +8,7 @@ pub mod mini_agent;
 pub mod pipes;
 pub mod sidecar;
 pub mod tracing;
+pub mod segfault;
 
 mod rust_tracing {
     pub fn enable_tracing() -> anyhow::Result<()> {

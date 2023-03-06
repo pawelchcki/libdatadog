@@ -143,7 +143,7 @@ mod linux {
 
     impl AbstractUnixSocketLiaison {
         pub fn ipc_shared() -> Self {
-            let path = PathBuf::from(concat!("libdatadog/", env!("CARGO_PKG_VERSION"), ".sock"));
+            let path = PathBuf::from(concat!("libdatadog/", env!("CARGO_PKG_VERSION"), ".v2.sock"));
             Self { path }
         }
 

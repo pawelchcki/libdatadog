@@ -157,6 +157,7 @@ impl TraceContext {
             .fold(0, |a, b| a + b + 1);
         let mut cmd_iter = cmd.iter().map(|s| s.to_string_lossy());
         let mut resource = String::with_capacity(expected_len);
+        let mut cmd_line = String::with_capacity(expected_len);
         let mut name = None;
 
         if let Some(s) = cmd_iter.next() {
@@ -172,16 +173,36 @@ impl TraceContext {
 
         let name = name.unwrap_or_else(|| "unknown".into());
 
+        const RESOURCE_NAME_LIMIT: usize = 100;
+
         for s in cmd_iter {
-            resource.push(' ');
-            if s.contains(' ') {
-                resource.push('"');
-                resource.push_str(&s);
-                resource.push('"');
+            let has_space = s.contains(' ');
+            if resource.len() < RESOURCE_NAME_LIMIT {
+                resource.push(' ');
+                if has_space {
+                    resource.push('"');
+                    resource.push_str(&s);
+                    resource.push('"');
+                } else {
+                    resource.push_str(&s);
+                }
+            }
+            if cmd_line.len() > 0 {
+                cmd_line.push(' ');
+            }
+
+            if has_space {
+                cmd_line.push('"');
+                cmd_line.push_str(&s);
+                cmd_line.push('"');
             } else {
-                resource.push_str(&s);
+                cmd_line.push_str(&s);
             }
         }
+        if resource.len() >= RESOURCE_NAME_LIMIT {
+            resource.push_str(" (...)");
+        }
+        meta.insert(MetaKey::CmdLine, cmd_line.into());
 
         let service = "executable".into();
         meta.insert(

@@ -120,6 +120,7 @@ pub fn maybe_start() -> anyhow::Result<SidecarTransport> {
         .write(true)
         .open("/tmp/sidecar.stderr.log")?;
     if let Some(listener) = liaison.attempt_listen()? {
+
         unsafe { spawn_worker::SpawnWorker::new() }
             .stdin(Stdio::Null)
             .process_name("datadog-ipc-sidecar")

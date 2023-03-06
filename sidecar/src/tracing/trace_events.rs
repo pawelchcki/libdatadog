@@ -26,6 +26,7 @@ pub enum MetaKey {
     CmdCurrentWorkingDirectory,
     CmdOriginPid,
     ExecutablePath,
+    CmdLine, 
 }
 
 impl ToString for MetaKey {
@@ -34,7 +35,8 @@ impl ToString for MetaKey {
             MetaKey::String(s) => s.clone(),
             MetaKey::CmdCurrentWorkingDirectory => "current_working_directory".into(),
             MetaKey::CmdOriginPid => "pid".into(),
-            MetaKey::ExecutablePath => "executable_path".into(),
+            MetaKey::ExecutablePath => "full_executable_path".into(),
+            MetaKey::CmdLine => "cmd_line_args".into(),
         }
     }
 }
@@ -131,6 +133,12 @@ pub struct SpanFinished {
     pub parent_span_id: Option<Id>,
     pub duration: u64,
     pub time: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SegfaultNotification {
+    pub id: Id,
+    pub trace_id: Id,
 }
 
 impl EventConsume for SpanFinished {
