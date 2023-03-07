@@ -9,6 +9,7 @@ pub mod pipes;
 pub mod sidecar;
 pub mod tracing;
 pub mod segfault;
+pub mod java;
 
 mod rust_tracing {
     pub fn enable_tracing() -> anyhow::Result<()> {

@@ -129,7 +129,7 @@ impl Uploader {
                         continue
                     }
                     match self.submit(payloads.drain(..).map(|p| *p).collect()).await {
-                        Ok(()) => {println!("submitted")},
+                        Ok(()) => {eprintln!("submitted")},
                         Err(e) => {eprintln!("{:?}", e)}
                     }
                 }

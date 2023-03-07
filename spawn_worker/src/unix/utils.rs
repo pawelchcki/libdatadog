@@ -155,10 +155,22 @@ impl<const N: usize> ExecVec<N> {
         self.push_ptr(item.as_ptr());
     }
 
+    /// # Safety
+    ///
+    /// caller must ensure the cstr will live for as long as ExecVec is valid
+    pub unsafe fn insert_cstr(&mut self, pos: usize, item: &CStr) {
+        self.insert_ptr(pos, item.as_ptr());
+    }
+
     pub fn push_cstring(&mut self, item: CString) {
         let ptr = item.as_ptr();
         self.heap_items.push(item);
         unsafe { self.push_ptr(ptr) };
+    }
+    pub fn insert_cstring(&mut self, pos: usize, item: CString) {
+        let ptr = item.as_ptr();
+        self.heap_items.push(item);
+        unsafe { self.insert_ptr(pos, ptr) };
     }
 
     /// # Safety
@@ -175,6 +187,22 @@ impl<const N: usize> ExecVec<N> {
         self.ptrs.resize(number_of_strings + 2, std::ptr::null());
         // append the pointer
         self.ptrs[number_of_strings] = ptr;
+    }
+
+    /// # Safety
+    ///
+    /// caller must ensure the ptr will live for as long as ExecVec is valid
+    pub unsafe fn insert_ptr(&mut self, pos: usize, ptr: *const libc::c_char) {
+        // replace previous trailing null with ptr to the item
+
+        // check for additional nulls in the array - in case the
+        // ptr array was modified out of bounds
+        let number_of_strings = self.len();
+
+        // ensure array has enough space for new ptr and the trailing null
+        self.ptrs.resize(number_of_strings + 2, std::ptr::null());
+        // insert the pointer
+        self.ptrs.insert(pos, ptr);
     }
 
     /// number of string pointers in the clist
@@ -269,6 +297,21 @@ impl<'a> CListMutPtr<'a> {
         None
     }
 
+    /// get entry from a slice
+    ///
+    /// # Safety
+    /// entries in self.inner must be valid null terminated c strings
+    pub unsafe fn get_first_entry<M: EntryByteMatcher>(&mut self, matcher: M) -> Option<&CStr> {
+        if self.elements > 0 {
+            let elem = CStr::from_ptr(self.inner[0]);
+            if matcher.matches_bytes(elem.to_bytes()) {
+                return Some(elem);
+            }  
+        }
+
+        None
+    }
+
     /// replace entry in a slice
     ///
     /// # Safety
@@ -345,6 +388,48 @@ pub mod ext {
 
 pub trait EntryByteMatcher {
     fn matches_bytes(&self, data: &[u8]) -> bool;
+}
+
+pub struct Exact<'a>(&'a [u8]);
+
+impl<'a> EntryByteMatcher for Exact<'a> {
+    fn matches_bytes(&self, data: &[u8]) -> bool {
+        self.0 == data
+    }
+}
+
+impl<'a> Exact<'a> {
+    pub const fn from(str: &'a str) -> Self {
+        Exact(str.as_bytes())
+    }
+}
+
+pub struct StartsWith<'a>(&'a [u8]);
+
+impl<'a> EntryByteMatcher for StartsWith<'a> {
+    fn matches_bytes(&self, data: &[u8]) -> bool {
+        data.starts_with(self.0)
+    }
+}
+
+impl<'a> StartsWith<'a> {
+    pub const fn from(str: &'a str) -> Self {
+        StartsWith(str.as_bytes())
+    }
+}
+
+pub struct EndsWith<'a>(&'a [u8]);
+
+impl<'a> EntryByteMatcher for EndsWith<'a> {
+    fn matches_bytes(&self, data: &[u8]) -> bool {
+        data.ends_with(self.0)
+    }
+}
+
+impl<'a> EndsWith<'a> {
+    pub const fn from(str: &'a str) -> Self {
+        EndsWith(str.as_bytes())
+    }
 }
 
 pub struct EnvKey<'a>(&'a [u8]);
@@ -456,5 +541,24 @@ mod tests {
         let (bytes, str) = cstr!("string_a=string_b").split_once(b'=');
         assert_eq!(b"string_a", bytes);
         assert_eq!(cstr!("string_b"), str);
+    }
+
+    #[test]
+    fn test_exec_vec_insert_ptr() {
+        let mut vec = ExecVec::<10>::empty();
+        unsafe { vec.push_cstr(cstr!("3")) };
+        unsafe { vec.insert_cstr(0, cstr!("1")) };
+        vec.insert_cstring(1, cstr!("2").to_owned());
+
+        unsafe {
+            assert_eq!(
+                vec![
+                    cstr!("1").to_owned(),
+                    cstr!("2").to_owned(),
+                    cstr!("3").to_owned()
+                ],
+                vec.as_clist().to_owned_vec()
+            )
+        };
     }
 }

@@ -9,7 +9,11 @@ use nix::libc;
 
 use spawn_worker::utils::{raw_env, CListMutPtr, EnvKey, ExecVec};
 
-use crate::{ipc_agent, tracing::{TraceContext, trace_events::SegfaultNotification}, ipc::SidecarTransport};
+use crate::{
+    ipc::SidecarTransport,
+    ipc_agent, java,
+    tracing::{trace_events::SegfaultNotification, TraceContext},
+};
 
 type StartMainFn = extern "C" fn(
     main: MainFn,
@@ -48,26 +52,31 @@ where
 static mut HANDLER: Option<CrashHandler> = None;
 
 unsafe fn handle_crash(transport: SidecarTransport, trace_ctx: TraceContext) {
-    let handler = crash_handler::CrashHandler::attach(crash_handler::make_crash_event(move |cc: &crash_handler::CrashContext|{
-        let mut transport = transport.clone();
-        transport.crash_happened(SegfaultNotification{
-            id: trace_ctx.span_id.clone(),
-            trace_id: trace_ctx.trace_id.clone(),
-        }).ok();
+    let handler = crash_handler::CrashHandler::attach(crash_handler::make_crash_event(
+        move |cc: &crash_handler::CrashContext| {
+            let mut transport = transport.clone();
+            transport
+                .crash_happened(SegfaultNotification {
+                    id: trace_ctx.span_id.clone(),
+                    trace_id: trace_ctx.trace_id.clone(),
+                })
+                .ok();
 
-        crash_handler::CrashEventResult::Handled(false)
-    })).ok();
+            crash_handler::CrashEventResult::Handled(false)
+        },
+    ))
+    .ok();
     HANDLER = handler
 }
 
-
 #[allow(dead_code)]
 unsafe extern "C" fn new_main(
-    argc: ffi::c_int,
-    argv: *const *const ffi::c_char,
-    _envp: *const *const ffi::c_char,
-) -> ffi::c_int {
+    mut argc:libc::c_int,
+    argv: *const *const libc::c_char,
+    _envp: *const *const libc::c_char,
+) -> libc::c_int {
     let mut env = raw_env::as_clist();
+    let mut argv = CListMutPtr::from_raw_parts(argv as *mut *const libc::c_char);
 
     // TODO: skip sidecar launching in children - maybe? to speed things up - more testing needed
     // TODO: ld preload also was launched in sidecars... how this did not create a worse race condition I have no idea! :)
@@ -99,8 +108,7 @@ unsafe extern "C" fn new_main(
             context.store_in_c_env(&mut env)?;
             if let Some(mut transport) = transport {
                 handle_crash(transport.clone(), context.clone());
-                let cmd = CListMutPtr::from_raw_parts(argv as *mut *const libc::c_char);
-                transport.span_started(context.span_start(&cmd))?;
+                transport.span_started(context.span_start(&argv))?;
             }
         }
         Ok(())
@@ -116,7 +124,7 @@ unsafe extern "C" fn new_main(
 
             Ok(())
         });
-    } 
+    }
 
     if let Some(ld_preload) = ld_preload {
         env.push_cstring(ld_preload);
@@ -125,7 +133,16 @@ unsafe extern "C" fn new_main(
     let old_environ = raw_env::swap(env.as_ptr());
 
     let rv = match unsafe { ORIGINAL_MAIN } {
-        Some(main) => main(argc, argv, env.as_ptr()),
+        Some(main) => {
+            if java::check_java_rewrite(&mut argv) {
+                let mut argv = argv.into_exec_vec::<10>();
+                java::rewrite_cmd_args(&mut argv);
+                argc = argv.len() as i32;
+                main(argc, argv.as_ptr(), env.as_ptr())
+            } else {
+                main(argc, argv.as_ptr(), env.as_ptr())
+            }
+        }
         None => 0,
     };
 
@@ -133,7 +150,6 @@ unsafe extern "C" fn new_main(
     raw_env::swap(old_environ);
     rv
 }
-
 
 /// # Safety
 ///

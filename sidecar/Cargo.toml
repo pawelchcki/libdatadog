@@ -34,6 +34,7 @@ tracing-subscriber = {version="0.3", default-features = false, features = ["std"
 
 # crash
 crash-handler = {version = "0.5"}
+tempfile = {version = "3.4"}
 
 [dev-dependencies]
 tokio-test = {version = "0.4"}

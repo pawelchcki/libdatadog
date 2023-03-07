@@ -13,6 +13,7 @@ use ddcommon::HttpClient;
 use hyper::service::Service;
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 
+use nix::libc;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -72,10 +73,16 @@ impl Service<Request<Body>> for MiniAgent {
             (&Method::POST | &Method::PUT, "/v0.4/traces") => {
                 let handler = self.v04_handler.clone();
                 Box::pin(async move { handler.handle(req).await })
-            }
+            },
+
+            (&Method::POST | &Method::PUT, "/v0.3/traces") => {
+                let handler = self.v04_handler.clone();
+                Box::pin(async move { handler.handle(req).await })
+            },
 
             // Return the 404 Not Found for other routes.
             _ => Box::pin(async move {
+                println!("{}", req.uri());
                 let mut not_found = Response::default();
                 *not_found.status_mut() = StatusCode::NOT_FOUND;
                 Ok(not_found)
@@ -184,18 +191,25 @@ pub(crate) unsafe fn maybe_start() -> anyhow::Result<PathBuf> {
         spawn_worker::SpawnWorker::new()
             .process_name("datadog-mini-agent-sidecar")
             .stdin(Stdio::Null)
-            .stderr(Stdio::Inherit)
-            .stdout(Stdio::Inherit)
+            .stderr(Stdio::Null)
+            .stdout(Stdio::Null)
             .pass_fd(listener)
             .daemonize(true)
             .target(entrypoint!(mini_agent_entrypoint))
             .spawn()?;
+        // TODO: temporary hack - connect to socket and leak it
+        // this should lead to sidecar being up as long as the processes that attempted to connect to it
+        let con = liaison.connect_to_server()?;
+        let raw_fd = con.into_raw_fd();
+        let flags = nix::fcntl::fcntl(raw_fd, nix::fcntl::F_GETFD)?;
+        unsafe {
+            libc::fcntl(
+                raw_fd,
+                libc::F_SETFD,
+                flags & !nix::libc::FD_CLOEXEC,
+            )
+        };
     };
-
-    // TODO: temporary hack - connect to socket and leak it
-    // this should lead to sidecar being up as long as the processes that attempted to connect to it
-    let con = liaison.connect_to_server()?;
-    con.into_raw_fd(); // LEAK!
 
     Ok(liaison.path().to_path_buf())
 }
