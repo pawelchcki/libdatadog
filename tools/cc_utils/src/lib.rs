@@ -108,7 +108,9 @@ impl ImprovedBuild {
     }
 
     pub fn new() -> Self {
-        let cc_build = cc::Build::new();
+        let mut cc_build = cc::Build::new();
+
+        cc_build.opt_level(2);
 
         ImprovedBuild {
             files: Default::default(),
