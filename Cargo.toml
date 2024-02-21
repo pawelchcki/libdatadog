@@ -19,6 +19,7 @@ members = [
   "sidecar-ffi",
   "tools/cc_utils",
   "tools/sidecar_mockgen",
+  "tools/xtask",
   "trace-normalization",
   "trace-obfuscation",
   "trace-utils",
@@ -38,6 +39,9 @@ edition = "2021"
 version = "6.0.0"
 license = "Apache-2.0"
 
+[workspace.dependencies]
+anyhow = {version = "1.0"}
+
 [profile.dev]
 debug = 2 # full debug info
 
@@ -49,3 +53,4 @@ opt-level = "s" # optimize for size
 
 [profile.release.package.datadog-serverless-trace-mini-agent]
 strip = true
+

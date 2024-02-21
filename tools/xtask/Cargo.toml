@@ -1,0 +1,11 @@
+[package]
+edition = "2021"
+name = "xtask"
+version = "0.1.0"
+
+[dependencies]
+anyhow.workspace = true
+xshell = { version = "0.2" }
+clap = { version = "4.5", features = ["derive"] }
+clio = { version = "0.3", features = ["clap-parse"] }
+toml_edit = { version = "0.22" }
